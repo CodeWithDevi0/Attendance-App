@@ -1,6 +1,8 @@
-# attendanceapp
+# Attendance App
 
 <!-- ...existing code... -->
+
+(assets/pics/qrAttendance.jpg)
 
 ## Overview
 
@@ -137,9 +139,3 @@ Suggested steps:
 - Kenneth D. Lico – Front-End Engineer
 - John Lyold C. Lozada - Backdancer
 - Joseph Claire L. Paquinol – Full-Stack Engineer
-
-## Fill These Placeholders
-
-Replace all sections marked (placeholder) with actual technologies in your current system.
-
-<!-- ...existing code... -->
