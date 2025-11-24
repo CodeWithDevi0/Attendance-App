@@ -54,9 +54,13 @@ dependencies:
   firebase_auth: ^6.1.2
   qr_flutter: ^4.1.0
   firebase_messaging: ^16.0.4
+  flutter_map: ^8.2.2
+  latlong2: ^0.9.1
   # Downgraded for Android plugin API (supports GoogleSignIn() constructor + signIn method)
   google_sign_in: 6.2.1
   firebase_app_check: ^0.4.1+2
+  google_maps_flutter: ^2.14.0
+  web_socket_channel: ^3.0.3
 
 dev_dependencies:
   flutter_test:

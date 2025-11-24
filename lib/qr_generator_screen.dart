@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:attendanceapp/model/user.dart';
@@ -20,6 +21,7 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
   String? _selectedEventId;
   bool _loadingEvents = true;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _events = [];
+  double _eventRadius = 100; // meters
 
   StreamSubscription? _timerSub;
   String _currentToken = '';
@@ -52,6 +54,7 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
         _selectedEventId = _events.first.id;
       }
     });
+    await _loadSelectedEventRadius();
   }
 
   Future<void> _createEventDialog() async {
@@ -77,14 +80,52 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
       ),
     );
     if (created == true && nameCtrl.text.trim().isNotEmpty) {
+      double? lat;
+      double? lng;
+      double? acc;
+      try {
+        final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+        if (serviceEnabled) {
+          var perm = await Geolocator.checkPermission();
+          if (perm == LocationPermission.denied) {
+            perm = await Geolocator.requestPermission();
+          }
+          if (perm != LocationPermission.denied &&
+              perm != LocationPermission.deniedForever) {
+            final pos = await Geolocator.getCurrentPosition(
+              desiredAccuracy: LocationAccuracy.high,
+            );
+            lat = pos.latitude;
+            lng = pos.longitude;
+            acc = pos.accuracy;
+          }
+        }
+      } catch (_) {}
       final docRef = await _db.collection('Events').add({
         'name': nameCtrl.text.trim(),
         'createdAt': FieldValue.serverTimestamp(),
         'creatorRole': User.role,
         'creatorUid': User.uid,
+        if (lat != null && lng != null) 'locLat': lat,
+        if (lat != null && lng != null) 'locLng': lng,
+        if (acc != null) 'locAccuracy': acc,
+        'locRadius': _eventRadius,
       });
       await _loadEvents();
       setState(() => _selectedEventId = docRef.id);
+    }
+  }
+
+  Future<void> _loadSelectedEventRadius() async {
+    if (_selectedEventId == null) return;
+    final snap = await _db.collection('Events').doc(_selectedEventId).get();
+    if (!snap.exists) return;
+    final data = snap.data();
+    if (data != null) {
+      setState(
+        () => _eventRadius =
+            (data['locRadius'] as num?)?.toDouble() ?? _eventRadius,
+      );
     }
   }
 
@@ -138,7 +179,7 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
     setState(() => _publishing = false);
   }
 
-  void _startDynamicRotation() {
+  Future<void> _startDynamicRotation() async {
     _timerSub?.cancel();
     // Immediately generate first
     final first = _generateDynamicToken();
@@ -159,6 +200,7 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
         validitySeconds: _intervalSeconds,
       );
     });
+    await _loadSelectedEventRadius();
   }
 
   void _stopDynamic() {
@@ -250,9 +292,31 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
                       ),
                     ),
                 ],
-                onChanged: (v) => setState(() => _selectedEventId = v),
+                onChanged: (v) async {
+                  setState(() => _selectedEventId = v);
+                  await _loadSelectedEventRadius();
+                },
               ),
             const SizedBox(height: 24),
+            const Text(
+              'Event Radius (meters)',
+              style: TextStyle(fontFamily: 'NexaBold', fontSize: 16),
+            ),
+            Slider(
+              min: 20,
+              max: 500,
+              divisions: 24,
+              label: _eventRadius.toStringAsFixed(0),
+              value: _eventRadius,
+              onChanged: (v) async {
+                setState(() => _eventRadius = v);
+                if (_selectedEventId != null) {
+                  await _db.collection('Events').doc(_selectedEventId).update({
+                    'locRadius': v,
+                  });
+                }
+              },
+            ),
             const Text(
               'QR Type',
               style: TextStyle(fontFamily: 'NexaBold', fontSize: 16),

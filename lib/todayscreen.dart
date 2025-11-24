@@ -2,10 +2,16 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:latlong2/latlong.dart' as latlng;
 import 'package:intl/intl.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:attendanceapp/model/user.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+// Token classification moved to top-level (enums cannot be inside classes)
+enum _ScanType { checkIn, checkOut, dynamicToken, event, unknown }
 
 class TodayScreen extends StatefulWidget {
   const TodayScreen({super.key});
@@ -21,6 +27,21 @@ class _TodayScreenState extends State<TodayScreen> {
   String checkIn = "--/--";
   String checkOut = "--/--";
   String location = " ";
+  double? checkInLat;
+  double? checkInLng;
+  double? checkOutLat;
+  double? checkOutLng;
+  // FlutterMap does not need a controller for simple markers.
+
+  // Classify scanned token to enforce correct sequence
+  _ScanType _classifyToken(String token) {
+    final t = token.trim().toUpperCase();
+    if (t.startsWith('CHECKIN:')) return _ScanType.checkIn;
+    if (t.startsWith('CHECKOUT:')) return _ScanType.checkOut;
+    if (t.startsWith('DYN:')) return _ScanType.dynamicToken;
+    if (t.startsWith('EVENT:')) return _ScanType.event;
+    return _ScanType.unknown;
+  }
 
   @override
   void initState() {
@@ -114,6 +135,10 @@ class _TodayScreenState extends State<TodayScreen> {
         setState(() {
           checkIn = '--/--';
           checkOut = '--/--';
+          checkInLat = null;
+          checkInLng = null;
+          checkOutLat = null;
+          checkOutLng = null;
         });
         return;
       }
@@ -121,13 +146,54 @@ class _TodayScreenState extends State<TodayScreen> {
       setState(() {
         checkIn = (data['checkIn'] ?? '--/--').toString();
         checkOut = (data['checkOut'] ?? '--/--').toString();
+        checkInLat = (data['checkInLat'] is num)
+            ? (data['checkInLat'] as num).toDouble()
+            : null;
+        checkInLng = (data['checkInLng'] is num)
+            ? (data['checkInLng'] as num).toDouble()
+            : null;
+        checkOutLat = (data['checkOutLat'] is num)
+            ? (data['checkOutLat'] as num).toDouble()
+            : null;
+        checkOutLng = (data['checkOutLng'] is num)
+            ? (data['checkOutLng'] as num).toDouble()
+            : null;
       });
+      _refreshMapSymbols();
     } catch (_) {
       setState(() {
         checkIn = '--/--';
         checkOut = '--/--';
+        checkInLat = null;
+        checkInLng = null;
+        checkOutLat = null;
+        checkOutLng = null;
       });
     }
+  }
+
+  Future<Position?> _capturePrecisePosition() async {
+    try {
+      LocationPermission perm = await Geolocator.checkPermission();
+      if (perm == LocationPermission.denied ||
+          perm == LocationPermission.deniedForever) {
+        perm = await Geolocator.requestPermission();
+        if (perm == LocationPermission.denied ||
+            perm == LocationPermission.deniedForever) {
+          return null;
+        }
+      }
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.bestForNavigation,
+      );
+      return position;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _refreshMapSymbols() {
+    // No-op retained for compatibility; FlutterMap rebuild handles markers.
   }
 
   @override
@@ -343,6 +409,55 @@ class _TodayScreenState extends State<TodayScreen> {
                 ],
               ),
 
+              const SizedBox(height: 14),
+              if (checkInLat != null || checkOutLat != null)
+                SizedBox(
+                  height: 220,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: FlutterMap(
+                      options: MapOptions(
+                        initialCenter: latlng.LatLng(
+                          (checkOutLat ?? checkInLat) ?? 0.0,
+                          (checkOutLng ?? checkInLng) ?? 0.0,
+                        ),
+                        initialZoom: 15,
+                        interactionOptions: const InteractionOptions(
+                          enableMultiFingerGestureRace: true,
+                        ),
+                      ),
+                      children: [
+                        TileLayer(
+                          urlTemplate:
+                              'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                          userAgentPackageName: 'com.example.attendanceapp',
+                        ),
+                        MarkerLayer(
+                          markers: [
+                            if (checkInLat != null && checkInLng != null)
+                              Marker(
+                                width: 40,
+                                height: 40,
+                                point: latlng.LatLng(checkInLat!, checkInLng!),
+                                child: _buildMarker('IN', Colors.green),
+                              ),
+                            if (checkOutLat != null && checkOutLng != null)
+                              Marker(
+                                width: 40,
+                                height: 40,
+                                point: latlng.LatLng(
+                                  checkOutLat!,
+                                  checkOutLng!,
+                                ),
+                                child: _buildMarker('OUT', Colors.blue),
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+
               const SizedBox(height: 26),
 
               // Scan CTA
@@ -379,6 +494,34 @@ class _TodayScreenState extends State<TodayScreen> {
                               ),
                             );
                             if (code == null) return;
+                            final scanType = _classifyToken(code);
+                            final position = await _capturePrecisePosition();
+                            double? lat = position?.latitude;
+                            double? lng = position?.longitude;
+                            if (position != null) {
+                              try {
+                                final placemarks =
+                                    await placemarkFromCoordinates(
+                                      position.latitude,
+                                      position.longitude,
+                                    );
+                                if (placemarks.isNotEmpty) {
+                                  final p = placemarks.first;
+                                  location =
+                                      [
+                                            p.street,
+                                            p.subLocality,
+                                            p.locality,
+                                            p.administrativeArea,
+                                            p.postalCode,
+                                            p.country,
+                                          ]
+                                          .whereType<String>()
+                                          .where((e) => e.trim().isNotEmpty)
+                                          .join(', ');
+                                }
+                              } catch (_) {}
+                            }
                             final now = DateTime.now();
                             final dateId = DateFormat(
                               'dd MMMM yyyy',
@@ -391,7 +534,14 @@ class _TodayScreenState extends State<TodayScreen> {
                                   .where('id', isEqualTo: User.studentId.trim())
                                   .limit(1)
                                   .get();
-                              if (studentQuery.docs.isEmpty) return;
+                              if (studentQuery.docs.isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text('Student record not found'),
+                                  ),
+                                );
+                                return;
+                              }
                               final studentDocId = studentQuery.docs.first.id;
                               final recordRef = FirebaseFirestore.instance
                                   .collection('Student')
@@ -399,34 +549,98 @@ class _TodayScreenState extends State<TodayScreen> {
                                   .collection('Record')
                                   .doc(dateId);
                               final recordSnap = await recordRef.get();
+                              final existing = recordSnap.data();
+
+                              // Guard: wrong sequence or duplicate scans
                               if (checkIn == '--/--') {
+                                // Expect a CHECKIN token for first scan
+                                if (scanType != _ScanType.checkIn) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Please scan a CHECK-IN QR first',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
                                 await recordRef.set({
                                   'date': Timestamp.now(),
                                   'checkIn': timeStr,
                                   'checkOut': '--/--',
                                   'location': location,
                                   'qrCode': code,
+                                  if (lat != null) 'checkInLat': lat,
+                                  if (lng != null) 'checkInLng': lng,
                                 }, SetOptions(merge: true));
-                                setState(() => checkIn = timeStr);
+                                setState(() {
+                                  checkIn = timeStr;
+                                  checkInLat = lat;
+                                  checkInLng = lng;
+                                });
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text('Checked in via QR'),
                                   ),
                                 );
                               } else if (checkOut == '--/--') {
+                                // Already checked in; require CHECKOUT token
+                                final storedCheckInCode = existing == null
+                                    ? null
+                                    : existing['qrCode'];
+                                if (scanType == _ScanType.checkIn &&
+                                    storedCheckInCode == code) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Already checked in with this QR',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
+                                if (scanType != _ScanType.checkOut) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Scan a CHECK-OUT QR to check out',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
                                 if (!recordSnap.exists) {
                                   await recordRef.set({
                                     'checkIn': checkIn,
                                     'checkOut': timeStr,
                                     'qrCodeOut': code,
+                                    if (lat != null) 'checkOutLat': lat,
+                                    if (lng != null) 'checkOutLng': lng,
                                   });
                                 } else {
+                                  final storedOutCode = existing?['qrCodeOut'];
+                                  if (storedOutCode == code) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Already checked out with this QR',
+                                        ),
+                                      ),
+                                    );
+                                    return;
+                                  }
                                   await recordRef.update({
                                     'checkOut': timeStr,
                                     'qrCodeOut': code,
+                                    if (lat != null) 'checkOutLat': lat,
+                                    if (lng != null) 'checkOutLng': lng,
                                   });
                                 }
-                                setState(() => checkOut = timeStr);
+                                setState(() {
+                                  checkOut = timeStr;
+                                  checkOutLat = lat;
+                                  checkOutLng = lng;
+                                });
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text('Checked out via QR'),
@@ -440,6 +654,7 @@ class _TodayScreenState extends State<TodayScreen> {
                                 );
                               }
                               _getRecord();
+                              _refreshMapSymbols();
                             } catch (e) {
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
@@ -458,6 +673,45 @@ class _TodayScreenState extends State<TodayScreen> {
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildMarker(String label, Color color) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.85),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            label,
+            style: const TextStyle(
+              fontFamily: 'NexaBold',
+              fontSize: 12,
+              color: Colors.white,
+            ),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            color: color,
+            shape: BoxShape.circle,
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black26,
+                blurRadius: 3,
+                offset: Offset(1, 1),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
