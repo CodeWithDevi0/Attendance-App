@@ -672,7 +672,7 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
                                   ),
                                 )
                                 .toList(),
-                            value: _selectedTeacherUid,
+                            initialValue: _selectedTeacherUid,
                             onChanged: (val) {
                               setState(() {
                                 _selectedTeacherUid = val;
