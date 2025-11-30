@@ -423,9 +423,10 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
           icon: const Icon(Icons.arrow_back),
           tooltip: 'Change account',
           onPressed: () async {
+            final nav = Navigator.of(context);
             await AuthService().signOut();
             if (!mounted) return;
-            Navigator.of(context).pushAndRemoveUntil(
+            nav.pushAndRemoveUntil(
               MaterialPageRoute(builder: (_) => const LoginPage()),
               (route) => false,
             );

@@ -5,6 +5,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:attendanceapp/model/user.dart';
+import 'package:attendanceapp/location_picker_screen.dart';
 
 enum QrKind { checkIn, checkOut, dynamicToken, eventSpecific }
 
@@ -80,9 +81,9 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
       ),
     );
     if (created == true && nameCtrl.text.trim().isNotEmpty) {
-      double? lat;
-      double? lng;
-      double? acc;
+      // Get initial location for picker
+      double initialLat = 0.0;
+      double initialLng = 0.0;
       try {
         final serviceEnabled = await Geolocator.isLocationServiceEnabled();
         if (serviceEnabled) {
@@ -93,26 +94,44 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
           if (perm != LocationPermission.denied &&
               perm != LocationPermission.deniedForever) {
             final pos = await Geolocator.getCurrentPosition(
-              desiredAccuracy: LocationAccuracy.high,
+              locationSettings: const LocationSettings(
+                accuracy: LocationAccuracy.high,
+              ),
             );
-            lat = pos.latitude;
-            lng = pos.longitude;
-            acc = pos.accuracy;
+            initialLat = pos.latitude;
+            initialLng = pos.longitude;
           }
         }
       } catch (_) {}
-      final docRef = await _db.collection('Events').add({
-        'name': nameCtrl.text.trim(),
-        'createdAt': FieldValue.serverTimestamp(),
-        'creatorRole': User.role,
-        'creatorUid': User.uid,
-        if (lat != null && lng != null) 'locLat': lat,
-        if (lat != null && lng != null) 'locLng': lng,
-        if (acc != null) 'locAccuracy': acc,
-        'locRadius': _eventRadius,
-      });
-      await _loadEvents();
-      setState(() => _selectedEventId = docRef.id);
+
+      // Navigate to location picker
+      final picked = await Navigator.push<Map<String, dynamic>>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => LocationPickerScreen(
+            initialLat: initialLat,
+            initialLng: initialLng,
+            initialRadius: _eventRadius,
+          ),
+        ),
+      );
+
+      if (picked != null) {
+        final lat = picked['lat'] as double?;
+        final lng = picked['lng'] as double?;
+        final radius = picked['radius'] as double?;
+        final docRef = await _db.collection('Events').add({
+          'name': nameCtrl.text.trim(),
+          'createdAt': FieldValue.serverTimestamp(),
+          'creatorRole': User.role,
+          'creatorUid': User.uid,
+          if (lat != null) 'locLat': lat,
+          if (lng != null) 'locLng': lng,
+          'locRadius': radius ?? _eventRadius,
+        });
+        await _loadEvents();
+        setState(() => _selectedEventId = docRef.id);
+      }
     }
   }
 
@@ -206,6 +225,84 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
   void _stopDynamic() {
     _timerSub?.cancel();
     _timerSub = null;
+  }
+
+  Future<void> _editSelectedEvent() async {
+    if (_selectedEventId == null) return;
+    final eventSnap = await _db
+        .collection('Events')
+        .doc(_selectedEventId)
+        .get();
+    if (!eventSnap.exists) return;
+    final data = eventSnap.data()!;
+    final nameCtrl = TextEditingController(text: data['name'] ?? '');
+    final latCtrl = TextEditingController(
+      text: (data['locLat'] as num?)?.toString() ?? '',
+    );
+    final lngCtrl = TextEditingController(
+      text: (data['locLng'] as num?)?.toString() ?? '',
+    );
+    final radiusCtrl = TextEditingController(
+      text: (data['locRadius'] as num?)?.toString() ?? '',
+    );
+    final dialogContext = context;
+    // Passing local context to showDialog is safe here; avoid linter false-positive.
+    // ignore: use_build_context_synchronously
+    showDialog<bool>(
+      context: dialogContext,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit Event'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: nameCtrl,
+              decoration: const InputDecoration(labelText: 'Event name'),
+            ),
+            TextField(
+              controller: latCtrl,
+              decoration: const InputDecoration(labelText: 'Latitude'),
+              keyboardType: TextInputType.number,
+            ),
+            TextField(
+              controller: lngCtrl,
+              decoration: const InputDecoration(labelText: 'Longitude'),
+              keyboardType: TextInputType.number,
+            ),
+            TextField(
+              controller: radiusCtrl,
+              decoration: const InputDecoration(labelText: 'Radius (meters)'),
+              keyboardType: TextInputType.number,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Update'),
+          ),
+        ],
+      ),
+    ).then((edited) async {
+      if (!mounted) return;
+      if (edited == true) {
+        final lat = double.tryParse(latCtrl.text);
+        final lng = double.tryParse(lngCtrl.text);
+        final radius = double.tryParse(radiusCtrl.text);
+        await _db.collection('Events').doc(_selectedEventId).update({
+          'name': nameCtrl.text.trim(),
+          if (lat != null) 'locLat': lat,
+          if (lng != null) 'locLng': lng,
+          if (radius != null) 'locRadius': radius,
+        });
+        await _loadEvents();
+        await _loadSelectedEventRadius();
+      }
+    });
   }
 
   void _generate() {
@@ -317,6 +414,13 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
                 }
               },
             ),
+            const SizedBox(height: 16),
+            if (_selectedEventId != null)
+              ElevatedButton(
+                onPressed: _editSelectedEvent,
+                child: const Text('Edit Event Details'),
+              ),
+            const SizedBox(height: 24),
             const Text(
               'QR Type',
               style: TextStyle(fontFamily: 'NexaBold', fontSize: 16),

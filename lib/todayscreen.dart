@@ -9,6 +9,7 @@ import 'package:intl/intl.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:attendanceapp/model/user.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:attendanceapp/services/location_service.dart';
 
 // Token classification moved to top-level (enums cannot be inside classes)
 enum _ScanType { checkIn, checkOut, dynamicToken, event, unknown }
@@ -41,6 +42,67 @@ class _TodayScreenState extends State<TodayScreen> {
     if (t.startsWith('DYN:')) return _ScanType.dynamicToken;
     if (t.startsWith('EVENT:')) return _ScanType.event;
     return _ScanType.unknown;
+  }
+
+  String? _extractEventId(String token) {
+    final parts = token.split(':');
+    if (parts.length >= 2) {
+      return parts[1];
+    }
+    return null;
+  }
+
+  Future<String?> _validateLocationForEvent(String eventId) async {
+    if (eventId == 'NONE') return null; // no validation
+    final eventSnap = await FirebaseFirestore.instance
+        .collection('Events')
+        .doc(eventId)
+        .get();
+    if (!eventSnap.exists) return 'Event not found';
+    final data = eventSnap.data();
+    if (data == null) return 'Event data missing';
+    double? toDouble(dynamic v) {
+      if (v == null) return null;
+      if (v is double) return v;
+      if (v is int) return v.toDouble();
+      if (v is num) return v.toDouble();
+      if (v is String) return double.tryParse(v);
+      return null;
+    }
+
+    final eventLat = toDouble(data['locLat']);
+    final eventLng = toDouble(data['locLng']);
+    final radius = toDouble(data['locRadius']);
+    if (eventLat == null || eventLng == null || radius == null) {
+      // No location configured for this event; skip validation
+      return null;
+    }
+
+    // Get current location at check-in time
+    final locService = LocationService();
+    final initialized = await locService.initialize();
+    if (!initialized) return 'Unable to access location services';
+    final userLat = await locService.getLatitude();
+    final userLng = await locService.getLongitude();
+    if (userLat == null || userLng == null)
+      return 'Unable to get your location';
+
+    // Update User static vars for consistency
+    User.lat = userLat;
+    User.long = userLng;
+
+    // Ensure all values are doubles and compute distance in meters
+    final distance = Geolocator.distanceBetween(
+      userLat,
+      userLng,
+      eventLat,
+      eventLng,
+    );
+
+    // Allow check-in when distance is <= radius (inclusive)
+    if (distance <= radius) return null;
+
+    return 'Check-in failed: You are not within the required location radius.';
   }
 
   @override
@@ -184,7 +246,9 @@ class _TodayScreenState extends State<TodayScreen> {
         }
       }
       final position = await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.bestForNavigation,
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.bestForNavigation,
+        ),
       );
       return position;
     } catch (_) {
@@ -487,15 +551,18 @@ class _TodayScreenState extends State<TodayScreen> {
                     ),
                     onPressed: checkOut == '--/--'
                         ? () async {
+                            final messenger = ScaffoldMessenger.of(context);
                             final code = await Navigator.push<String>(
                               context,
                               MaterialPageRoute(
                                 builder: (_) => _QrScanScreen(primary: primary),
                               ),
                             );
+                            if (!mounted) return;
                             if (code == null) return;
                             final scanType = _classifyToken(code);
                             final position = await _capturePrecisePosition();
+                            if (!mounted) return;
                             double? lat = position?.latitude;
                             double? lng = position?.longitude;
                             if (position != null) {
@@ -505,6 +572,7 @@ class _TodayScreenState extends State<TodayScreen> {
                                       position.latitude,
                                       position.longitude,
                                     );
+                                if (!mounted) return;
                                 if (placemarks.isNotEmpty) {
                                   final p = placemarks.first;
                                   location =
@@ -534,8 +602,10 @@ class _TodayScreenState extends State<TodayScreen> {
                                   .where('id', isEqualTo: User.studentId.trim())
                                   .limit(1)
                                   .get();
+                              if (!mounted) return;
                               if (studentQuery.docs.isEmpty) {
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                if (!mounted) return;
+                                messenger.showSnackBar(
                                   const SnackBar(
                                     content: Text('Student record not found'),
                                   ),
@@ -549,18 +619,30 @@ class _TodayScreenState extends State<TodayScreen> {
                                   .collection('Record')
                                   .doc(dateId);
                               final recordSnap = await recordRef.get();
+                              if (!mounted) return;
                               final existing = recordSnap.data();
 
                               // Guard: wrong sequence or duplicate scans
                               if (checkIn == '--/--') {
                                 // Expect a CHECKIN token for first scan
                                 if (scanType != _ScanType.checkIn) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  messenger.showSnackBar(
                                     const SnackBar(
                                       content: Text(
                                         'Please scan a CHECK-IN QR first',
                                       ),
                                     ),
+                                  );
+                                  return;
+                                }
+                                // Validate location for event
+                                final eventId = _extractEventId(code) ?? 'NONE';
+                                final validationError =
+                                    await _validateLocationForEvent(eventId);
+                                if (validationError != null) {
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
+                                    SnackBar(content: Text(validationError)),
                                   );
                                   return;
                                 }
@@ -573,12 +655,13 @@ class _TodayScreenState extends State<TodayScreen> {
                                   if (lat != null) 'checkInLat': lat,
                                   if (lng != null) 'checkInLng': lng,
                                 }, SetOptions(merge: true));
+                                if (!mounted) return;
                                 setState(() {
                                   checkIn = timeStr;
                                   checkInLat = lat;
                                   checkInLng = lng;
                                 });
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                messenger.showSnackBar(
                                   const SnackBar(
                                     content: Text('Checked in via QR'),
                                   ),
@@ -590,7 +673,8 @@ class _TodayScreenState extends State<TodayScreen> {
                                     : existing['qrCode'];
                                 if (scanType == _ScanType.checkIn &&
                                     storedCheckInCode == code) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
                                     const SnackBar(
                                       content: Text(
                                         'Already checked in with this QR',
@@ -600,12 +684,24 @@ class _TodayScreenState extends State<TodayScreen> {
                                   return;
                                 }
                                 if (scanType != _ScanType.checkOut) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
                                     const SnackBar(
                                       content: Text(
                                         'Scan a CHECK-OUT QR to check out',
                                       ),
                                     ),
+                                  );
+                                  return;
+                                }
+                                // Validate location for event
+                                final eventId = _extractEventId(code) ?? 'NONE';
+                                final validationError =
+                                    await _validateLocationForEvent(eventId);
+                                if (validationError != null) {
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
+                                    SnackBar(content: Text(validationError)),
                                   );
                                   return;
                                 }
@@ -620,7 +716,8 @@ class _TodayScreenState extends State<TodayScreen> {
                                 } else {
                                   final storedOutCode = existing?['qrCodeOut'];
                                   if (storedOutCode == code) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
+                                    if (!mounted) return;
+                                    messenger.showSnackBar(
                                       const SnackBar(
                                         content: Text(
                                           'Already checked out with this QR',
@@ -636,27 +733,31 @@ class _TodayScreenState extends State<TodayScreen> {
                                     if (lng != null) 'checkOutLng': lng,
                                   });
                                 }
+                                if (!mounted) return;
                                 setState(() {
                                   checkOut = timeStr;
                                   checkOutLat = lat;
                                   checkOutLng = lng;
                                 });
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                messenger.showSnackBar(
                                   const SnackBar(
                                     content: Text('Checked out via QR'),
                                   ),
                                 );
                               } else {
-                                ScaffoldMessenger.of(context).showSnackBar(
+                                if (!mounted) return;
+                                messenger.showSnackBar(
                                   const SnackBar(
                                     content: Text('Already checked out today'),
                                   ),
                                 );
                               }
+                              if (!mounted) return;
                               _getRecord();
                               _refreshMapSymbols();
                             } catch (e) {
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              if (!mounted) return;
+                              messenger.showSnackBar(
                                 const SnackBar(
                                   content: Text('QR attendance failed'),
                                 ),

@@ -246,13 +246,31 @@ class AuthService {
   }) async {
     try {
       if (kIsWeb) {
-        // Web: GoogleAuthProvider with popup flow
+        // Web: try popup flow first; if the browser blocks popups or
+        // Cross-Origin-Opener-Policy prevents closing the popup, fall
+        // back to a redirect flow which is more compatible.
         final provider = fb.GoogleAuthProvider()
           ..addScope('email')
           ..addScope('profile');
-        final cred = await _auth.signInWithPopup(provider);
-        await _postSocialLogin(cred.user, provider: 'google');
-        return null;
+        try {
+          final cred = await _auth.signInWithPopup(provider);
+          await _postSocialLogin(cred.user, provider: 'google');
+          return null;
+        } catch (e) {
+          // Popup failed (possibly blocked by COOP/COEP or browser policy).
+          // Fallback to redirect sign-in which opens in the same tab.
+          print('Web popup sign-in failed, falling back to redirect: $e');
+          try {
+            await _auth.signInWithRedirect(provider);
+            // No immediate credential produced; the redirect flow will
+            // complete after navigation. Return null to indicate the
+            // operation was started.
+            return null;
+          } catch (e2) {
+            print('Web redirect sign-in also failed: $e2');
+            return 'Google sign-in failed: ${e2.toString()}';
+          }
+        }
       }
       // Android/iOS: use google_sign_in plugin for more reliable native flow
       final googleSignIn = GoogleSignIn(scopes: ['email', 'profile']);

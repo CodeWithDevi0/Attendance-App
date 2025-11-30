@@ -21,15 +21,28 @@ Future<void> main() async {
   await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
 
   if (!kIsWeb) {
-    // Native (Android/iOS) App Check activation.
-    await FirebaseAppCheck.instance.activate(
-      androidProvider: AndroidProvider.playIntegrity,
-    );
+    // Native (Android/iOS) App Check activation. Run in background with
+    // a short timeout so missing device services don't block app startup.
+    Future(() async {
+      try {
+        await FirebaseAppCheck.instance
+            .activate(androidProvider: AndroidProvider.playIntegrity)
+            .timeout(const Duration(seconds: 3));
+        // ignore: avoid_print
+        print('App Check activated');
+      } catch (e) {
+        // Ignore App Check activation failures to avoid startup ANR.
+        // Log for debugging.
+        // ignore: avoid_print
+        print('App Check activation failed or timed out: $e');
+      }
+    });
   } else {
     // Web: App Check is initialized via JS in web/index.html (reCAPTCHA v3).
-    // No Dart activation needed; suppress previous warning print.
   }
-  // Initialize FCM after Firebase & before runApp; actual token save occurs after login.
+
+  // Start the Flutter app immediately to avoid blocking the main thread
+  // during remote initialization steps.
   runApp(const MyApp());
 }
 
