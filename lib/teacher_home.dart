@@ -4,9 +4,51 @@ import 'package:attendanceapp/login_page.dart';
 import 'package:attendanceapp/model/user.dart';
 import 'package:attendanceapp/verification_screen.dart';
 import 'package:attendanceapp/unified_event_screen.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
-class TeacherHome extends StatelessWidget {
+class TeacherHome extends StatefulWidget {
   const TeacherHome({super.key});
+
+  @override
+  State<TeacherHome> createState() => _TeacherHomeState();
+}
+
+class _TeacherHomeState extends State<TeacherHome> {
+  String? _teacherName;
+  bool _loadingName = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTeacherData();
+  }
+
+  Future<void> _loadTeacherData() async {
+    try {
+      final userSnap = await FirebaseFirestore.instance
+          .collection('Users')
+          .doc(User.uid)
+          .get();
+
+      if (userSnap.exists) {
+        final data = userSnap.data() as Map<String, dynamic>;
+        if (mounted) {
+          setState(() {
+            _teacherName = data['fullName']?.toString();
+            _loadingName = false;
+          });
+        }
+      } else {
+        if (mounted) {
+          setState(() => _loadingName = false);
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _loadingName = false);
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -66,7 +108,9 @@ class TeacherHome extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Welcome Teacher',
+              _loadingName
+                  ? 'Welcome Teacher'
+                  : 'Welcome ${_teacherName ?? 'Teacher'}',
               style: const TextStyle(fontFamily: 'NexaBold', fontSize: 24),
             ),
             const SizedBox(height: 12),
