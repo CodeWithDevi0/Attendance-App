@@ -32,7 +32,19 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
     super.dispose();
   }
 
+  // --- HELPER TO SHOW ERRORS ---
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
   Future<void> _createEvent() async {
+    // 1. SECURITY CHECK: Are we logged in?
+    if (User.uid.isEmpty) {
+      _showSnack('Error: You are not logged in. Cannot create event.');
+      return;
+    }
+
     final nameCtrl = TextEditingController();
     final created = await showDialog<bool>(
       context: context,
@@ -54,26 +66,43 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
         ],
       ),
     );
+
     if (created == true && nameCtrl.text.trim().isNotEmpty) {
-      // Get current location for initial map position
-      final locService = LocationService();
-      final initialized = await locService.initialize();
       double lat = 0.0;
       double lng = 0.0;
-      if (initialized) {
-        lat = await locService.getLatitude() ?? 0.0;
-        lng = await locService.getLongitude() ?? 0.0;
+
+      // 2. LOCATION FETCH (Isolated so it doesn't break creation)
+      try {
+        final locService = LocationService();
+        // We use a try-catch specifically for initialization to handle Web errors
+        final initialized = await locService.initialize();
+        if (initialized) {
+          lat = await locService.getLatitude() ?? 0.0;
+          lng = await locService.getLongitude() ?? 0.0;
+        }
+      } catch (e) {
+        // Just log the warning, don't stop the function!
+        print('Location Warning (Web/Perms): $e. Using default (0,0).');
       }
-      final docRef = await _db.collection('Events').add({
-        'name': nameCtrl.text.trim(),
-        'createdAt': FieldValue.serverTimestamp(),
-        'creatorRole': User.role,
-        'creatorUid': User.uid,
-        'locLat': lat,
-        'locLng': lng,
-        'locRadius': 100.0, // default
-      });
-      setState(() => _selectedEventId = docRef.id);
+
+      // 3. DATABASE SAVE
+      try {
+        final docRef = await _db.collection('Events').add({
+          'name': nameCtrl.text.trim(),
+          'createdAt': FieldValue.serverTimestamp(),
+          'creatorRole': User.role,
+          'creatorUid': User.uid,
+          'locLat': lat,
+          'locLng': lng,
+          'locRadius': 100.0, // default
+        });
+
+        setState(() => _selectedEventId = docRef.id);
+        _showSnack('Event created successfully!');
+      } catch (e) {
+        _showSnack('Database Error: $e');
+        print('Create Event Error: $e');
+      }
     }
   }
 
@@ -84,13 +113,17 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
     double lng = (data['locLng'] as num?)?.toDouble() ?? 0.0;
     double radius = (data['locRadius'] as num?)?.toDouble() ?? 100.0;
 
-    // If no location set, get current location
+    // If no location set, try to fetch current (Isolated try-catch)
     if (lat == 0.0 && lng == 0.0) {
-      final locService = LocationService();
-      final initialized = await locService.initialize();
-      if (initialized) {
-        lat = await locService.getLatitude() ?? 0.0;
-        lng = await locService.getLongitude() ?? 0.0;
+      try {
+        final locService = LocationService();
+        final initialized = await locService.initialize();
+        if (initialized) {
+          lat = await locService.getLatitude() ?? 0.0;
+          lng = await locService.getLongitude() ?? 0.0;
+        }
+      } catch (e) {
+        print('Location Warning during Edit: $e');
       }
     }
 
@@ -115,22 +148,34 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                 const SizedBox(height: 16),
                 ElevatedButton(
                   onPressed: () async {
-                    final picked = await Navigator.of(ctx)
-                        .push<Map<String, dynamic>>(
-                          MaterialPageRoute(
-                            builder: (_) => LocationPickerScreen(
-                              initialLat: lat,
-                              initialLng: lng,
-                              initialRadius: radius,
+                    try {
+                      final picked = await Navigator.of(ctx)
+                          .push<Map<String, dynamic>>(
+                            MaterialPageRoute(
+                              builder: (_) => LocationPickerScreen(
+                                initialLat: lat,
+                                initialLng: lng,
+                                initialRadius: radius,
+                              ),
                             ),
+                          );
+                      if (picked != null) {
+                        setState(() {
+                          lat = picked['lat'];
+                          lng = picked['lng'];
+                          radius = picked['radius'];
+                        });
+                      }
+                    } catch (e) {
+                      // On Web, LocationPicker might fail if it uses google_maps_flutter without setup
+                      print("Location Picker Error: $e");
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Map picker not supported on this platform/configuration.',
                           ),
-                        );
-                    if (picked != null) {
-                      setState(() {
-                        lat = picked['lat'];
-                        lng = picked['lng'];
-                        radius = picked['radius'];
-                      });
+                        ),
+                      );
                     }
                   },
                   child: const Text('Edit Location & Radius'),
@@ -153,16 +198,16 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
     );
 
     if (saved == true && mounted) {
-      await _db.collection('Events').doc(event.id).update({
-        'name': nameCtrl.text.trim(),
-        'locLat': lat,
-        'locLng': lng,
-        'locRadius': radius,
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Event updated successfully')),
-        );
+      try {
+        await _db.collection('Events').doc(event.id).update({
+          'name': nameCtrl.text.trim(),
+          'locLat': lat,
+          'locLng': lng,
+          'locRadius': radius,
+        });
+        _showSnack('Event updated successfully');
+      } catch (e) {
+        _showSnack('Update Failed: $e');
       }
     }
   }
@@ -188,11 +233,11 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
       ),
     );
     if (confirm == true) {
-      await _db.collection('Events').doc(eventId).delete();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Event deleted successfully')),
-        );
+      try {
+        await _db.collection('Events').doc(eventId).delete();
+        _showSnack('Event deleted successfully');
+      } catch (e) {
+        _showSnack('Delete Failed: $e');
       }
     }
   }
@@ -224,30 +269,46 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
     int? validitySeconds,
   }) async {
     if (_selectedEventId == null) return;
+
+    // SECURITY CHECK
+    if (User.uid.isEmpty) {
+      print("ERROR: User.uid is empty. Cannot publish token.");
+      return;
+    }
+
     setState(() => _publishing = true);
-    final data = {
-      'token': token,
-      'kind': kind.name,
-      'createdAt': FieldValue.serverTimestamp(),
-      if (validitySeconds != null) 'validFor': validitySeconds,
-      'eventId': _selectedEventId,
-      'issuerUid': User.uid,
-    };
-    await _db
-        .collection('Events')
-        .doc(_selectedEventId)
-        .collection('activeTokens')
-        .doc(token)
-        .set(data);
-    setState(() => _publishing = false);
+
+    try {
+      final data = {
+        'token': token,
+        'kind': kind.name,
+        'createdAt': FieldValue.serverTimestamp(),
+        if (validitySeconds != null) 'validFor': validitySeconds,
+        'eventId': _selectedEventId,
+        'issuerUid': User.uid,
+      };
+      await _db
+          .collection('Events')
+          .doc(_selectedEventId)
+          .collection('activeTokens')
+          .doc(token)
+          .set(data);
+    } catch (e) {
+      print("Database Error publishing token: $e");
+    }
+
+    if (mounted) setState(() => _publishing = false);
   }
 
   void _generateQR(String eventId) {
     setState(() => _selectedEventId = eventId);
+    setState(() => _currentToken = '');
+
     showDialog(
       context: context,
+      barrierDismissible: false, // Prevent accidental closing
       builder: (ctx) => StatefulBuilder(
-        builder: (context, setState) => AlertDialog(
+        builder: (context, setDialogState) => AlertDialog(
           title: const Text('Generate QR Code'),
           content: SingleChildScrollView(
             child: Column(
@@ -260,7 +321,10 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                         (k) => DropdownMenuItem(value: k, child: Text(k.name)),
                       )
                       .toList(),
-                  onChanged: (v) => setState(() => _kind = v!),
+                  onChanged: (v) {
+                    setState(() => _kind = v!);
+                    setDialogState(() => _kind = v!);
+                  },
                 ),
                 if (_kind == QrKind.dynamicToken)
                   TextField(
@@ -271,34 +335,53 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                     onChanged: (v) => _intervalSeconds = int.tryParse(v) ?? 30,
                   ),
                 const SizedBox(height: 16),
+
                 ElevatedButton(
                   onPressed: _publishing
                       ? null
                       : () async {
+                          if (User.uid.isEmpty) {
+                            Navigator.pop(ctx);
+                            _showSnack(
+                              'Login required to generate valid QR codes.',
+                            );
+                            return;
+                          }
+
                           if (_kind == QrKind.dynamicToken) {
                             _timerSub?.cancel();
                             final first = _generateDynamicToken();
+
                             setState(() => _currentToken = first);
+                            setDialogState(() => _currentToken = first);
+
                             await _publishToken(
                               first,
                               kind: QrKind.dynamicToken,
                               validitySeconds: _intervalSeconds,
                             );
+
                             _timerSub =
                                 Stream.periodic(
                                   Duration(seconds: _intervalSeconds),
                                 ).listen((_) {
                                   final t = _generateDynamicToken();
-                                  setState(() => _currentToken = t);
-                                  _publishToken(
-                                    t,
-                                    kind: QrKind.dynamicToken,
-                                    validitySeconds: _intervalSeconds,
-                                  );
+                                  if (mounted && ctx.mounted) {
+                                    setState(() => _currentToken = t);
+                                    setDialogState(() => _currentToken = t);
+                                    _publishToken(
+                                      t,
+                                      kind: QrKind.dynamicToken,
+                                      validitySeconds: _intervalSeconds,
+                                    );
+                                  }
                                 });
                           } else {
                             final token = _buildStaticToken();
+
                             setState(() => _currentToken = token);
+                            setDialogState(() => _currentToken = token);
+
                             await _publishToken(token, kind: _kind);
                           }
                         },
@@ -308,10 +391,30 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                         : 'Generate QR',
                   ),
                 ),
+
+                // --- THE BOX FIX ---
                 if (_currentToken.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 16),
-                    child: QrImageView(data: _currentToken, size: 200),
+                    child: Column(
+                      children: [
+                        SizedBox(
+                          width: 220,
+                          height: 220,
+                          child: QrImageView(
+                            data: _currentToken,
+                            version: QrVersions.auto,
+                            backgroundColor: Colors.white,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        SelectableText(
+                          _currentToken,
+                          style: const TextStyle(fontSize: 10),
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
                   ),
               ],
             ),
@@ -333,11 +436,13 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Event Management')),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _createEvent,
-        child: const Icon(Icons.add),
-        tooltip: 'Create Event',
+      appBar: AppBar(
+        title: const Text(
+          'Event Management',
+          style: TextStyle(fontFamily: 'NexaBold', color: Colors.white),
+        ),
+        backgroundColor: const Color(0xFF28a745), // Success Green
+        iconTheme: const IconThemeData(color: Colors.white), // White Back Arrow
       ),
       body: StreamBuilder<QuerySnapshot>(
         stream: _db
@@ -383,17 +488,14 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                       IconButton(
                         icon: const Icon(Icons.qr_code),
                         onPressed: () => _generateQR(event.id),
-                        tooltip: 'Generate QR',
                       ),
                       IconButton(
                         icon: const Icon(Icons.edit),
                         onPressed: () => _editEvent(event),
-                        tooltip: 'Edit',
                       ),
                       IconButton(
                         icon: const Icon(Icons.delete),
                         onPressed: () => _deleteEvent(event.id),
-                        tooltip: 'Delete',
                       ),
                     ],
                   ),

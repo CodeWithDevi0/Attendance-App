@@ -1,35 +1,61 @@
-import 'package:location/location.dart';
+import 'package:geolocator/geolocator.dart';
 
 class LocationService {
-  final Location _location = Location();
-  bool serviceEnabled = false;
-  bool permissionGranted = false;
-
+  /// Checks permissions and service status.
+  /// Returns true if everything is ready to get location.
   Future<bool> initialize() async {
-    serviceEnabled = await _location.serviceEnabled();
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    // 1. Check if location services are enabled (GPS/Device location)
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      serviceEnabled = await _location.requestService();
-      if (!serviceEnabled) return false;
+      // Location services are not enabled.
+      print('Location services are disabled.');
+      return false;
     }
 
-    var permissionStatus = await _location.hasPermission();
-    if (permissionStatus == PermissionStatus.denied) {
-      permissionStatus = await _location.requestPermission();
-      if (permissionStatus != PermissionStatus.granted) return false;
+    // 2. Check for permissions
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      // If denied, ask for permission
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        print('Location permissions are denied');
+        return false;
+      }
     }
-    permissionGranted = permissionStatus == PermissionStatus.granted;
-    return serviceEnabled && permissionGranted;
+
+    if (permission == LocationPermission.deniedForever) {
+      print('Location permissions are permanently denied.');
+      return false;
+    }
+
+    return true;
   }
 
-  Future<LocationData?> _safeGet() async {
-    if (!serviceEnabled || !permissionGranted) return null;
+  /// Internal helper to safely get position with a timeout
+  Future<Position?> _getPosition() async {
     try {
-      return await _location.getLocation();
-    } catch (_) {
+      // We set a timeout so it doesn't hang forever if the browser is slow
+      return await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 5),
+      );
+    } catch (e) {
+      print("Geolocator Error: $e");
       return null;
     }
   }
 
-  Future<double?> getLatitude() async => (await _safeGet())?.latitude;
-  Future<double?> getLongitude() async => (await _safeGet())?.longitude;
+  // Wrappers to match your existing code structure
+  Future<double?> getLatitude() async {
+    final pos = await _getPosition();
+    return pos?.latitude;
+  }
+
+  Future<double?> getLongitude() async {
+    final pos = await _getPosition();
+    return pos?.longitude;
+  }
 }

@@ -2,7 +2,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 
 class VerificationScreen extends StatelessWidget {
-  const VerificationScreen({super.key});
+  // Add a flag to restrict the view to students only
+  final bool onlyStudents;
+
+  const VerificationScreen({
+    super.key,
+    this.onlyStudents = false, // Defaults to showing everyone (for Admin)
+  });
 
   Future<void> _updateStatus(
     BuildContext context,
@@ -86,7 +92,6 @@ class VerificationScreen extends StatelessWidget {
   }
 
   Future<void> _backfillMissingStatus(BuildContext context) async {
-    // Fetch users without a status field (isNull query). Requires Firestore supporting isNull.
     try {
       final missingSnap = await FirebaseFirestore.instance
           .collection('Users')
@@ -113,268 +118,305 @@ class VerificationScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Construct Query
+    Query<Map<String, dynamic>> query = FirebaseFirestore.instance
+        .collection('Users')
+        .where('status', isEqualTo: 'pending');
+
+    // IF TEACHER: Filter strictly for students
+    if (onlyStudents) {
+      query = query.where('role', isEqualTo: 'student');
+    }
+
     return Scaffold(
       appBar: AppBar(
         title: const Text(
           'Pending Accounts',
-          style: TextStyle(fontFamily: 'NexaBold'),
+          style: TextStyle(fontFamily: 'NexaBold', color: Colors.white),
         ),
+        backgroundColor: const Color(0xFF28a745), // Success Green
+        iconTheme: const IconThemeData(color: Colors.white),
+        centerTitle: true,
       ),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: FirebaseFirestore.instance
-            .collection('Users')
-            .where('status', isEqualTo: 'pending')
-            .orderBy('createdAt', descending: true)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          if (snapshot.hasError) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      Icons.error_outline,
-                      size: 48,
-                      color: Colors.red,
+      body: Center(
+        // Responsive Constraint
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 600),
+          child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+            // Order by creation time
+            stream: query.orderBy('createdAt', descending: true).snapshots(),
+            builder: (context, snapshot) {
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snapshot.hasError) {
+                return Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(
+                          Icons.error_outline,
+                          size: 48,
+                          color: Colors.red,
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'Error loading pending accounts:\n${snapshot.error}',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontFamily: 'NexaRegular'),
+                        ),
+                        const SizedBox(height: 16),
+                        ElevatedButton.icon(
+                          onPressed: () => _backfillMissingStatus(context),
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Backfill Missing Status'),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Error loading pending accounts:\n${snapshot.error}',
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(fontFamily: 'NexaRegular'),
+                  ),
+                );
+              }
+              final docs = snapshot.data?.docs ?? [];
+              if (docs.isEmpty) {
+                return Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          'No pending accounts found.',
+                          style: TextStyle(fontFamily: 'NexaRegular'),
+                        ),
+                        const SizedBox(height: 12),
+                        ElevatedButton.icon(
+                          onPressed: () => _backfillMissingStatus(context),
+                          icon: const Icon(Icons.build),
+                          label: const Text('Backfill Missing Status'),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 16),
-                    ElevatedButton.icon(
-                      onPressed: () => _backfillMissingStatus(context),
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Backfill Missing Status'),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-          final docs = snapshot.data?.docs ?? [];
-          if (docs.isEmpty) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text(
-                      'No pending accounts found.',
-                      style: TextStyle(fontFamily: 'NexaRegular'),
-                    ),
-                    const SizedBox(height: 12),
-                    ElevatedButton.icon(
-                      onPressed: () => _backfillMissingStatus(context),
-                      icon: const Icon(Icons.build),
-                      label: const Text('Backfill Missing Status'),
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-          return ListView.separated(
-            padding: const EdgeInsets.all(16),
-            itemBuilder: (c, i) {
-              final d = docs[i].data();
-              final uid = d['uid'] ?? docs[i].id;
-              final email = d['email'] ?? 'unknown';
-              final role = d['role'] ?? 'n/a';
-              final studentId = d['studentId'];
-              final teacherId = d['teacherId'];
-              final fullName = d['fullName'];
-              final address = d['address'];
-              final profileUrl = d['profilePictureUrl'];
-              final idUrl = d['idScreenshotUrl'];
+                  ),
+                );
+              }
+              return ListView.separated(
+                padding: const EdgeInsets.all(16),
+                itemBuilder: (c, i) {
+                  final d = docs[i].data();
+                  final uid = d['uid'] ?? docs[i].id;
+                  final email = d['email'] ?? 'unknown';
+                  final role = d['role'] ?? 'n/a';
+                  final studentId = d['studentId'];
+                  final teacherId = d['teacherId'];
+                  final fullName = d['fullName'];
+                  final address = d['address'];
+                  final profileUrl = d['profilePictureUrl'];
+                  final idUrl = d['idScreenshotUrl'];
 
-              return Card(
-                elevation: 4,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
+                  return Card(
+                    elevation: 4,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Profile picture
-                          if (profileUrl != null)
+                          Row(
+                            children: [
+                              // Profile picture
+                              if (profileUrl != null)
+                                GestureDetector(
+                                  onTap: () => _showImageDialog(
+                                    context,
+                                    profileUrl,
+                                    'Profile Picture',
+                                  ),
+                                  child: CircleAvatar(
+                                    radius: 30,
+                                    backgroundImage: NetworkImage(profileUrl),
+                                    backgroundColor: Colors.grey[200],
+                                  ),
+                                )
+                              else
+                                CircleAvatar(
+                                  radius: 30,
+                                  backgroundColor: Colors.grey[200],
+                                  child: const Icon(
+                                    Icons.person,
+                                    color: Colors.grey,
+                                  ),
+                                ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (fullName != null)
+                                      Text(
+                                        fullName,
+                                        style: const TextStyle(
+                                          fontFamily: 'NexaBold',
+                                          fontSize: 16,
+                                        ),
+                                      ),
+                                    Text(
+                                      email,
+                                      style: const TextStyle(
+                                        fontFamily: 'NexaRegular',
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Role: $role',
+                            style: const TextStyle(fontFamily: 'NexaRegular'),
+                          ),
+                          if (studentId != null)
+                            Text(
+                              'Student ID: $studentId',
+                              style: const TextStyle(fontFamily: 'NexaRegular'),
+                            ),
+                          if (teacherId != null)
+                            Text(
+                              'Teacher ID: $teacherId',
+                              style: const TextStyle(fontFamily: 'NexaRegular'),
+                            ),
+                          if (address != null)
+                            Text(
+                              'Address: $address',
+                              style: const TextStyle(
+                                fontFamily: 'NexaRegular',
+                                fontSize: 12,
+                              ),
+                            ),
+                          // ID Screenshot
+                          if (idUrl != null) ...[
+                            const SizedBox(height: 12),
+                            const Text(
+                              'ID Screenshot:',
+                              style: TextStyle(
+                                fontFamily: 'NexaBold',
+                                fontSize: 12,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
                             GestureDetector(
                               onTap: () => _showImageDialog(
                                 context,
-                                profileUrl,
-                                'Profile Picture',
-                              ),
-                              child: CircleAvatar(
-                                radius: 30,
-                                backgroundImage: NetworkImage(profileUrl),
-                                backgroundColor: Colors.grey[200],
-                              ),
-                            )
-                          else
-                            CircleAvatar(
-                              radius: 30,
-                              backgroundColor: Colors.grey[200],
-                              child: const Icon(
-                                Icons.person,
-                                color: Colors.grey,
-                              ),
-                            ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                if (fullName != null)
-                                  Text(
-                                    fullName,
-                                    style: const TextStyle(
-                                      fontFamily: 'NexaBold',
-                                      fontSize: 16,
-                                    ),
-                                  ),
-                                Text(
-                                  email,
-                                  style: const TextStyle(
-                                    fontFamily: 'NexaRegular',
-                                    fontSize: 14,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      Text(
-                        'Role: $role',
-                        style: const TextStyle(fontFamily: 'NexaRegular'),
-                      ),
-                      if (studentId != null)
-                        Text(
-                          'Student ID: $studentId',
-                          style: const TextStyle(fontFamily: 'NexaRegular'),
-                        ),
-                      if (teacherId != null)
-                        Text(
-                          'Teacher ID: $teacherId',
-                          style: const TextStyle(fontFamily: 'NexaRegular'),
-                        ),
-                      if (address != null)
-                        Text(
-                          'Address: $address',
-                          style: const TextStyle(
-                            fontFamily: 'NexaRegular',
-                            fontSize: 12,
-                          ),
-                        ),
-                      // ID Screenshot
-                      if (idUrl != null) ...[
-                        const SizedBox(height: 12),
-                        const Text(
-                          'ID Screenshot:',
-                          style: TextStyle(
-                            fontFamily: 'NexaBold',
-                            fontSize: 12,
-                          ),
-                        ),
-                        const SizedBox(height: 6),
-                        GestureDetector(
-                          onTap: () =>
-                              _showImageDialog(context, idUrl, 'ID Screenshot'),
-                          child: Container(
-                            height: 120,
-                            width: double.infinity,
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(color: Colors.grey[300]!),
-                            ),
-                            child: ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Image.network(
                                 idUrl,
-                                fit: BoxFit.cover,
-                                errorBuilder: (context, error, stackTrace) {
-                                  return Center(
-                                    child: Column(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: [
-                                        const Icon(
-                                          Icons.error_outline,
-                                          color: Colors.red,
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          'Failed to load',
-                                          style: TextStyle(
-                                            fontSize: 10,
-                                            color: Colors.grey[600],
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  );
-                                },
-                                loadingBuilder:
-                                    (context, child, loadingProgress) {
-                                      if (loadingProgress == null) return child;
+                                'ID Screenshot',
+                              ),
+                              child: Container(
+                                height: 120,
+                                width: double.infinity,
+                                decoration: BoxDecoration(
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(color: Colors.grey[300]!),
+                                ),
+                                child: ClipRRect(
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Image.network(
+                                    idUrl,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (context, error, stackTrace) {
                                       return Center(
-                                        child: CircularProgressIndicator(
-                                          value:
-                                              loadingProgress
-                                                      .expectedTotalBytes !=
-                                                  null
-                                              ? loadingProgress
-                                                        .cumulativeBytesLoaded /
-                                                    loadingProgress
-                                                        .expectedTotalBytes!
-                                              : null,
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            const Icon(
+                                              Icons.error_outline,
+                                              color: Colors.red,
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              'Failed to load',
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                color: Colors.grey[600],
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       );
                                     },
+                                    loadingBuilder:
+                                        (context, child, loadingProgress) {
+                                          if (loadingProgress == null)
+                                            return child;
+                                          return Center(
+                                            child: CircularProgressIndicator(
+                                              value:
+                                                  loadingProgress
+                                                          .expectedTotalBytes !=
+                                                      null
+                                                  ? loadingProgress
+                                                            .cumulativeBytesLoaded /
+                                                        loadingProgress
+                                                            .expectedTotalBytes!
+                                                  : null,
+                                            ),
+                                          );
+                                        },
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          ElevatedButton.icon(
-                            onPressed: () =>
-                                _updateStatus(context, uid, 'approved'),
-                            icon: const Icon(Icons.check),
-                            label: const Text('Approve'),
-                          ),
-                          const SizedBox(width: 12),
-                          OutlinedButton.icon(
-                            onPressed: () =>
-                                _updateStatus(context, uid, 'rejected'),
-                            icon: const Icon(Icons.close),
-                            label: const Text('Reject'),
+                          ],
+                          const SizedBox(height: 20),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              // REJECT (Red)
+                              ElevatedButton.icon(
+                                onPressed: () =>
+                                    _updateStatus(context, uid, 'rejected'),
+                                icon: const Icon(
+                                  Icons.close,
+                                  color: Colors.white,
+                                ),
+                                label: const Text('Reject'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.red,
+                                  foregroundColor: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              // APPROVE (Green)
+                              ElevatedButton.icon(
+                                onPressed: () =>
+                                    _updateStatus(context, uid, 'approved'),
+                                icon: const Icon(
+                                  Icons.check,
+                                  color: Colors.white,
+                                ),
+                                label: const Text('Approve'),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.green,
+                                  foregroundColor: Colors.white,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
-                    ],
-                  ),
-                ),
+                    ),
+                  );
+                },
+                separatorBuilder: (_, __) => const SizedBox(height: 12),
+                itemCount: docs.length,
               );
             },
-            separatorBuilder: (_, __) => const SizedBox(height: 12),
-            itemCount: docs.length,
-          );
-        },
+          ),
+        ),
       ),
     );
   }
