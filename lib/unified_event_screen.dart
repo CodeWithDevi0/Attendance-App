@@ -38,6 +38,24 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
+  /// Determines the stream of events based on User Role.
+  /// - Admin: Sees ALL events.
+  /// - Others (Teacher): Sees only events they created.
+  Stream<QuerySnapshot> _getEventsStream() {
+    Query<Map<String, dynamic>> query = _db.collection('Events');
+
+    // Case-insensitive check for admin role
+    bool isAdmin = (User.role ?? '').toLowerCase().trim() == 'admin';
+
+    if (!isAdmin) {
+      // If NOT admin, filter to show only events created by this user
+      query = query.where('creatorUid', isEqualTo: User.uid);
+    }
+
+    // Return events sorted by creation date
+    return query.orderBy('createdAt', descending: true).snapshots();
+  }
+
   Future<void> _createEvent() async {
     // 1. SECURITY CHECK: Are we logged in?
     if (User.uid.isEmpty) {
@@ -71,17 +89,15 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
       double lat = 0.0;
       double lng = 0.0;
 
-      // 2. LOCATION FETCH (Isolated so it doesn't break creation)
+      // 2. LOCATION FETCH
       try {
         final locService = LocationService();
-        // We use a try-catch specifically for initialization to handle Web errors
         final initialized = await locService.initialize();
         if (initialized) {
           lat = await locService.getLatitude() ?? 0.0;
           lng = await locService.getLongitude() ?? 0.0;
         }
       } catch (e) {
-        // Just log the warning, don't stop the function!
         print('Location Warning (Web/Perms): $e. Using default (0,0).');
       }
 
@@ -113,7 +129,6 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
     double lng = (data['locLng'] as num?)?.toDouble() ?? 0.0;
     double radius = (data['locRadius'] as num?)?.toDouble() ?? 100.0;
 
-    // If no location set, try to fetch current (Isolated try-catch)
     if (lat == 0.0 && lng == 0.0) {
       try {
         final locService = LocationService();
@@ -167,7 +182,6 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                         });
                       }
                     } catch (e) {
-                      // On Web, LocationPicker might fail if it uses google_maps_flutter without setup
                       print("Location Picker Error: $e");
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
@@ -269,12 +283,7 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
     int? validitySeconds,
   }) async {
     if (_selectedEventId == null) return;
-
-    // SECURITY CHECK
-    if (User.uid.isEmpty) {
-      print("ERROR: User.uid is empty. Cannot publish token.");
-      return;
-    }
+    if (User.uid.isEmpty) return;
 
     setState(() => _publishing = true);
 
@@ -306,7 +315,7 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
 
     showDialog(
       context: context,
-      barrierDismissible: false, // Prevent accidental closing
+      barrierDismissible: false,
       builder: (ctx) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
           title: const Text('Generate QR Code'),
@@ -392,7 +401,6 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                   ),
                 ),
 
-                // --- THE BOX FIX ---
                 if (_currentToken.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 16),
@@ -444,66 +452,94 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
         backgroundColor: const Color(0xFF28a745), // Success Green
         iconTheme: const IconThemeData(color: Colors.white), // White Back Arrow
       ),
-      body: StreamBuilder<QuerySnapshot>(
-        stream: _db
-            .collection('Events')
-            .where('creatorUid', isEqualTo: User.uid)
-            .orderBy('createdAt', descending: true)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          }
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final events = snapshot.data!.docs;
-          if (events.isEmpty) {
-            return const Center(
-              child: Text('No events found. Create one to get started.'),
-            );
-          }
-          return ListView.builder(
-            itemCount: events.length,
-            itemBuilder: (context, index) {
-              final event = events[index];
-              final data = event.data() as Map<String, dynamic>;
-              final name = data['name'] ?? 'Unnamed Event';
-              final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
-              final locLat = data['locLat'];
-              final locLng = data['locLng'];
-              final locRadius = data['locRadius'] ?? 100.0;
-              return Card(
-                margin: const EdgeInsets.all(8),
-                child: ListTile(
-                  title: Text(name),
-                  subtitle: Text(
-                    'Created: ${createdAt != null ? createdAt.toString().substring(0, 16) : 'Unknown'}\n'
-                    'Location: ${locLat != null && locLng != null ? '${locLat.toStringAsFixed(4)}, ${locLng.toStringAsFixed(4)}' : 'Not set'}\n'
-                    'Radius: ${locRadius.toStringAsFixed(0)}m',
-                  ),
-                  trailing: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.qr_code),
-                        onPressed: () => _generateQR(event.id),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _createEvent,
+        backgroundColor: const Color(0xFF28a745), // Success Green
+        child: const Icon(Icons.add, color: Colors.white),
+      ),
+      // --- CENTERED & CONSTRAINED WIDTH ---
+      body: Center(
+        child: Container(
+          // Constraints ensure cards don't get too wide on PC
+          constraints: const BoxConstraints(maxWidth: 600),
+          child: StreamBuilder<QuerySnapshot>(
+            stream: _getEventsStream(),
+            builder: (context, snapshot) {
+              if (snapshot.hasError) {
+                return Center(child: Text('Error: ${snapshot.error}'));
+              }
+              if (snapshot.connectionState == ConnectionState.waiting) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              final events = snapshot.data!.docs;
+              if (events.isEmpty) {
+                return const Center(
+                  child: Text('No events found. Create one to get started.'),
+                );
+              }
+              return ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: events.length,
+                itemBuilder: (context, index) {
+                  final event = events[index];
+                  final data = event.data() as Map<String, dynamic>;
+                  final name = data['name'] ?? 'Unnamed Event';
+                  final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
+                  final creatorRole = data['creatorRole'] ?? 'unknown';
+                  final locLat = data['locLat'];
+                  final locLng = data['locLng'];
+                  final locRadius = data['locRadius'] ?? 100.0;
+                  return Card(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: ListTile(
+                      title: Text(
+                        name,
+                        style: const TextStyle(
+                          fontFamily: 'NexaBold',
+                          fontSize: 16,
+                        ),
                       ),
-                      IconButton(
-                        icon: const Icon(Icons.edit),
-                        onPressed: () => _editEvent(event),
+                      subtitle: Text(
+                        'Created: ${createdAt != null ? createdAt.toString().substring(0, 16) : 'Unknown'}\n'
+                        'By: $creatorRole\n'
+                        'Location: ${locLat != null && locLng != null ? '${locLat.toStringAsFixed(4)}, ${locLng.toStringAsFixed(4)}' : 'Not set'}\n'
+                        'Radius: ${locRadius.toStringAsFixed(0)}m',
+                        style: const TextStyle(fontFamily: 'NexaRegular'),
                       ),
-                      IconButton(
-                        icon: const Icon(Icons.delete),
-                        onPressed: () => _deleteEvent(event.id),
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            // --- CHANGED: Blue Icon ---
+                            icon: const Icon(Icons.qr_code, color: Colors.blue),
+                            onPressed: () => _generateQR(event.id),
+                          ),
+                          IconButton(
+                            // --- CHANGED: Success Green Icon ---
+                            icon: const Icon(
+                              Icons.edit,
+                              color: Color(0xFF28a745),
+                            ),
+                            onPressed: () => _editEvent(event),
+                          ),
+                          IconButton(
+                            // --- CHANGED: Danger Red Icon ---
+                            icon: const Icon(Icons.delete, color: Colors.red),
+                            onPressed: () => _deleteEvent(event.id),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                ),
+                    ),
+                  );
+                },
               );
             },
-          );
-        },
+          ),
+        ),
       ),
     );
   }

@@ -345,7 +345,7 @@ class _AdminHomeState extends State<AdminHome> {
   }
 }
 
-// --- SETTINGS SCREEN ---
+// --- SETTINGS SCREEN (CONSTRAINED WIDTH) ---
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
@@ -365,6 +365,7 @@ class SettingsScreen extends StatelessWidget {
         iconTheme: const IconThemeData(color: Colors.white),
       ),
       body: Center(
+        // CONSTRAIN WIDTH FOR PC
         child: Container(
           constraints: const BoxConstraints(maxWidth: 800),
           child: SingleChildScrollView(
@@ -563,7 +564,7 @@ class SettingsScreen extends StatelessWidget {
   }
 }
 
-// --- USERS LIST VIEW (FIXED: CENTERED & CONSTRAINED) ---
+// --- USERS LIST VIEW (CONSTRAINED WIDTH) ---
 class UsersListView extends StatefulWidget {
   const UsersListView({super.key});
 
@@ -780,8 +781,6 @@ class _UsersListViewState extends State<UsersListView> {
               items: const [
                 DropdownMenuItem(value: 'student', child: Text('Student')),
                 DropdownMenuItem(value: 'teacher', child: Text('Teacher')),
-                // Note: Admin option removed so you can't accidentally make someone admin via this UI
-                // If you want to allow promoting to admin, add it back.
               ],
               onChanged: (val) => role = val!,
             ),
@@ -886,13 +885,16 @@ class _UsersListViewState extends State<UsersListView> {
           child: StreamBuilder<QuerySnapshot>(
             stream: _db.collection('Users').orderBy('role').snapshots(),
             builder: (context, snapshot) {
-              if (snapshot.hasError)
+              if (snapshot.hasError) {
                 return const Center(child: Text('Error loading users'));
-              if (snapshot.connectionState == ConnectionState.waiting)
+              }
+              if (snapshot.connectionState == ConnectionState.waiting) {
                 return const Center(child: CircularProgressIndicator());
+              }
               final users = snapshot.data!.docs;
-              if (users.isEmpty)
+              if (users.isEmpty) {
                 return const Center(child: Text('No users found'));
+              }
 
               return ListView.separated(
                 padding: const EdgeInsets.all(16),
@@ -907,10 +909,12 @@ class _UsersListViewState extends State<UsersListView> {
 
                   Color roleColor = Colors.grey;
                   if (role.toLowerCase() == 'admin') roleColor = colSuccess;
-                  if (role.toLowerCase() == 'teacher')
+                  if (role.toLowerCase() == 'teacher') {
                     roleColor = const Color(0xFF2D3436);
-                  if (role.toLowerCase() == 'student')
+                  }
+                  if (role.toLowerCase() == 'student') {
                     roleColor = const Color(0xFF0984E3);
+                  }
 
                   return Container(
                     decoration: BoxDecoration(
@@ -953,10 +957,10 @@ class _UsersListViewState extends State<UsersListView> {
                       ),
                       trailing: PopupMenuButton<String>(
                         onSelected: (value) {
-                          if (value == 'edit')
+                          if (value == 'edit') {
                             _showEditUserDialog(data, user.id);
-                          if (value == 'delete')
-                            _deleteUser(user.id, role); // Passed role here
+                          }
+                          if (value == 'delete') _deleteUser(user.id, role);
                         },
                         itemBuilder: (ctx) => [
                           // Only show edit/delete if NOT admin
@@ -1007,8 +1011,7 @@ class _UsersListViewState extends State<UsersListView> {
   }
 }
 
-// ... (Sub-widgets: _QuickActionChip, _TransparentStatCard, _SettingsGroup, _SettingsTile, _SectionHeader remain exactly the same as before)
-
+// ... (Sub-widgets: _QuickActionChip, _TransparentStatCard, _SettingsGroup, _SettingsTile, _SectionHeader remain the same)
 class _SectionHeader extends StatelessWidget {
   final String title;
   const _SectionHeader({required this.title});
