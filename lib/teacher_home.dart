@@ -7,6 +7,9 @@ import 'package:attendanceapp/unified_event_screen.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 
+// Teacher dashboard home screen.
+// Shows a personalized welcome, date/time, email, and quick actions
+// like verifying accounts and managing events.
 class TeacherHome extends StatefulWidget {
   const TeacherHome({super.key});
 
@@ -15,7 +18,9 @@ class TeacherHome extends StatefulWidget {
 }
 
 class _TeacherHomeState extends State<TeacherHome> {
+  // Holds teacher's display name fetched from Firestore `Users/{uid}`.
   String? _teacherName;
+  // Whether the name is currently being loaded; controls header placeholder.
   bool _loadingName = true;
 
   @override
@@ -36,11 +41,13 @@ class _TeacherHomeState extends State<TeacherHome> {
         if (mounted) {
           setState(() {
             _teacherName = data['fullName']?.toString();
+            // Fetch teacher profile data on screen load.
             _loadingName = false;
           });
         }
       } else {
         if (mounted) {
+          // Read the Firestore `Users` document for the current authenticated user.
           setState(() => _loadingName = false);
         }
       }
@@ -50,17 +57,20 @@ class _TeacherHomeState extends State<TeacherHome> {
       }
     }
   }
+  // Prefer fullName; fall back is handled in the UI.
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text(
+          // No user doc; continue without a name.
           'Teacher Dashboard',
           style: TextStyle(fontFamily: 'NexaBold'),
         ),
         actions: [
           IconButton(
+            // Swallow errors but stop loading to avoid spinner.
             tooltip: 'Logout',
             icon: const Icon(Icons.logout),
             onPressed: () async {
@@ -79,6 +89,7 @@ class _TeacherHomeState extends State<TeacherHome> {
                       child: const Text('Sign Out'),
                     ),
                   ],
+                  // Confirm with the user before signing out.
                 ),
               );
               if (confirm == true) {
@@ -97,6 +108,7 @@ class _TeacherHomeState extends State<TeacherHome> {
             icon: const Icon(Icons.event),
             onPressed: () {
               Navigator.of(context).push(
+                // Invalidate session and return to login.
                 MaterialPageRoute(builder: (_) => const UnifiedEventScreen()),
               );
             },
@@ -111,6 +123,7 @@ class _TeacherHomeState extends State<TeacherHome> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
+                // Navigate to unified event management screen.
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -165,6 +178,7 @@ class _TeacherHomeState extends State<TeacherHome> {
 
             const SizedBox(height: 12),
             Text(
+              // Rebuild every second to show current time.
               'Email: ${User.email}',
               style: const TextStyle(fontFamily: 'NexaRegular'),
             ),
@@ -188,5 +202,6 @@ class _TeacherHomeState extends State<TeacherHome> {
         ),
       ),
     );
+    // Shortcut to verification workflow.
   }
 }
