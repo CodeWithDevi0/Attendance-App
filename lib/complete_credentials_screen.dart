@@ -11,56 +11,116 @@ import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import 'dart:async';
 
-// Complete profile screen for newly registered or social sign-in users.
-// Collects role-specific fields, uploads profile/ID images to Cloudinary,
-// and saves additional user data to Firestore, then routes to pending screen.
+/// UNIFIED REGISTRATION FLOW - Profile Completion Screen
+///
+/// This screen serves as the second step in the registration process for:
+/// 1. Google Sign-In users (always redirected here from register_page.dart)
+/// 2. Email/Password users with 'incomplete' status
+///
+/// PURPOSE:
+/// - Collects comprehensive profile information (name, address, birthdate, etc.)
+/// - Uploads profile picture and ID screenshot to Cloudinary
+/// - Saves all data to Firestore under the user's document
+/// - Enforces role-specific required fields (student vs teacher)
+///
+/// DATA FLOW:
+/// register_page.dart → complete_credentials_screen.dart → pending_verification_screen.dart
+///
+/// ROLE LOCKING:
+/// - forcedRole parameter prevents users from changing their selected role
+/// - Passed from register_page.dart after Google Sign-In or email registration
+///
+/// VALIDATION & STORAGE:
+/// - Form validation ensures all required fields are filled
+/// - Pre-submission checks verify images and role-specific fields
+/// - Firestore merge operation preserves existing user data (email, role, uid)
+/// - Cloudinary stores images with secure URLs saved to Firestore
+///
+/// NAVIGATION:
+/// - Success: Routes to PendingVerificationScreen (awaiting admin approval)
+/// - Logout: Returns to LoginPage with account sign-out
 class CompleteCredentialsScreen extends StatefulWidget {
-  final String? forcedRole; // 'student' or 'teacher' to lock the role
+  /// Role forced from previous screen (prevents role switching during registration)
+  /// - 'student': Lock to student role with student-specific fields
+  /// - 'teacher': Lock to teacher role with teacher-specific fields
+  /// - null: Allow role selection (legacy support)
+  final String? forcedRole;
+
   const CompleteCredentialsScreen({super.key, this.forcedRole});
+
   @override
   State<CompleteCredentialsScreen> createState() =>
       _CompleteCredentialsScreenState();
 }
 
 class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
+  // === FORM CONTROLLERS ===
+  // Core fields required for all users
   final _formKey = GlobalKey<FormState>();
-  final _idController = TextEditingController();
-  final _fullNameController = TextEditingController();
-  final _addressController = TextEditingController();
-  DateTime? _birthDate;
-  XFile? _profileImage;
-  XFile? _idImage;
-  String _role = 'student';
-  bool _loading = false;
-  bool _uploadingProfile = false;
-  bool _uploadingId = false;
-  String? _error;
-  String? _uploadProgress;
-  // Additional safety and academic fields
-  final _studentPhoneController = TextEditingController(); // optional
+  final _idController = TextEditingController(); // Student ID or Teacher ID
+  final _fullNameController = TextEditingController(); // Full legal name
+  final _addressController = TextEditingController(); // Home address
+
+  // === STATE VARIABLES ===
+  DateTime? _birthDate; // Date of birth (required)
+  XFile? _profileImage; // Profile picture (required, uploaded to Cloudinary)
+  XFile?
+  _idImage; // ID screenshot for verification (required, uploaded to Cloudinary)
+  String _role = 'student'; // Default role, locked if forcedRole is provided
+  bool _loading = false; // Main submission loading state
+  bool _uploadingProfile = false; // Profile image picker loading state
+  bool _uploadingId = false; // ID image picker loading state
+  String? _error; // Error message display
+  String? _uploadProgress; // Current upload step message
+
+  // === STUDENT-SPECIFIC FIELDS ===
+  // Safety and emergency contact information
+  final _studentPhoneController =
+      TextEditingController(); // Student's own phone (optional)
   final _parentPhoneController =
-      TextEditingController(); // required for students
+      TextEditingController(); // Parent/guardian phone (required)
   final _guardianNameController =
-      TextEditingController(); // required for students
-  final _sectionController = TextEditingController(); // required for students
-  // Teacher-specific fields
-  final _teacherPhoneController = TextEditingController();
-  final _teacherSectionController = TextEditingController();
-  final _teacherAdviserController = TextEditingController();
-  // Adviser teacher selection (for students)
-  List<Map<String, String>> _teachers = [];
-  String? _selectedTeacherUid;
-  String? _selectedTeacherName;
-  bool _loadingTeachers = false;
+      TextEditingController(); // Parent/guardian full name (required)
+  final _sectionController =
+      TextEditingController(); // Academic section/class (auto-set from adviser)
+  String? _selectedTeacherAdvisory; // Advisory linked to selected teacher
+
+  // === TEACHER-SPECIFIC FIELDS ===
+  // Professional and contact information
+  final _teacherPhoneController =
+      TextEditingController(); // Teacher contact number (required)
+  final _teacherSectionController =
+      TextEditingController(); // Section teacher handles (required)
+  final _teacherAdviserController =
+      TextEditingController(); // Department adviser name (required)
+  // Teacher Advisory Section field - stores the class/section the teacher advises
+  final _teacherAdvisoryController =
+      TextEditingController(); // Advisory section the teacher manages (required)
+
+  // === STUDENT ADVISER SELECTION ===
+  // Dropdown data for selecting assigned teacher/adviser
+  List<Map<String, String?>> _teachers =
+      []; // List of approved teachers fetched from Firestore (with advisory)
+  String? _selectedTeacherUid; // Selected teacher's Firebase UID
+  String? _selectedTeacherName; // Selected teacher's display name
+  bool _loadingTeachers = false; // Loading state for teacher list fetch
 
   @override
   void initState() {
     super.initState();
-    // Lock role if provided by the caller and pre-load teacher list when needed
+
+    // === ROLE LOCKING FOR UNIFIED REGISTRATION ===
+    // If forcedRole is provided (from register_page.dart), lock the role selector
+    // This prevents users from changing their role mid-registration
     _role = widget.forcedRole ?? _role;
+
+    // Pre-load teacher list for student role (used in adviser dropdown)
     if (_role == 'student') _loadTeachers();
   }
 
+  /// Loads list of approved teachers from Firestore for student adviser dropdown.
+  /// Only fetches teachers with status='approved' to ensure valid adviser assignment.
+  /// Called automatically when role is 'student' in initState.
   Future<void> _loadTeachers() async {
     setState(() => _loadingTeachers = true);
     try {
@@ -73,7 +133,8 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
         final data = d.data();
         final displayName = (data['fullName'] ?? data['email'] ?? 'Teacher')
             .toString();
-        return {'uid': d.id, 'name': displayName};
+        final advisory = data['advisory']?.toString();
+        return {'uid': d.id, 'name': displayName, 'advisory': advisory};
       }).toList();
     } catch (e) {
       _error ??= 'Failed to load adviser list: ${e.toString()}';
@@ -91,19 +152,34 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
     _guardianNameController.dispose();
     _sectionController.dispose();
     _teacherPhoneController.dispose();
-    _teacherSectionController.dispose();
-    _teacherAdviserController.dispose();
+    _teacherAdvisoryController.dispose();
     super.dispose();
   }
 
-  // Main submit handler:
-  // - Validates form
-  // - Uploads images to Cloudinary
-  // - Calls AuthService.completeCredentials
-  // - Persists additional fields (name/address/etc.) in Firestore
-  // - Navigates to PendingVerificationScreen on success
+  /// UNIFIED REGISTRATION - Main submission handler
+  ///
+  /// PROCESS FLOW:
+  /// 1. Validate all form fields (TextFormField validators)
+  /// 2. Upload profile picture to Cloudinary → get secure URL
+  /// 3. Upload ID screenshot to Cloudinary → get secure URL
+  /// 4. Call AuthService.completeCredentials (updates User model and Firestore role/status)
+  /// 5. Save comprehensive profile data to Firestore (merge with existing user document)
+  /// 6. Navigate to PendingVerificationScreen (awaiting admin approval)
+  ///
+  /// DATA SAVED TO FIRESTORE:
+  /// - Core: fullName, address, birthdate, profilePictureUrl, idScreenshotUrl
+  /// - Student: studentId, studentContactPhone, parentPhone, guardianName, section, adviserTeacherUid/Name
+  /// - Teacher: teacherId, contactNumber, advisory (section managed by teacher)
+  /// - Compliance: acceptedTerms, acceptedTermsAt timestamp
+  ///
+  /// ERROR HANDLING:
+  /// - Network errors during image upload
+  /// - Cloudinary configuration errors (preset, cloud name)
+  /// - Firestore write failures
+  /// - Timeout scenarios (30s auth, 10s Firestore)
   Future<void> _submit() async {
     if (!_formKey.currentState!.validate()) return;
+
     setState(() {
       _loading = true;
       _error = null;
@@ -240,33 +316,68 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
       if (err == null && (_role == 'student' || _role == 'teacher')) {
         if (!mounted) return;
         setState(() => _uploadProgress = 'Saving additional data...');
-        try {
-          final data = <String, dynamic>{
-            'fullName': _fullNameController.text.trim(),
-            'address': _addressController.text.trim(),
-            'birthdate': _birthDate != null
-                ? Timestamp.fromDate(_birthDate!)
-                : null,
-            if (profileUrl != null) 'profilePictureUrl': profileUrl,
-            if (idUrl != null) 'idScreenshotUrl': idUrl,
-            if (studentId != null && studentId.isNotEmpty)
-              'studentId': studentId,
-            if (teacherId != null && teacherId.isNotEmpty)
-              'teacherId': teacherId,
-            if (_role == 'student')
-              'studentContactPhone': _studentPhoneController.text.trim(),
-            if (_role == 'student')
-              'parentPhone': _parentPhoneController.text.trim(),
-            if (_role == 'student')
-              'guardianName': _guardianNameController.text.trim(),
-            if (_role == 'student') 'section': _sectionController.text.trim(),
-            if (_role == 'student') 'adviserTeacherUid': _selectedTeacherUid,
-            if (_role == 'student') 'adviserTeacherName': _selectedTeacherName,
-            'acceptedTerms': true,
-            'acceptedTermsAt': FieldValue.serverTimestamp(),
-          }..removeWhere((k, v) => v == null);
 
-          // Debug: Log URLs being saved
+        try {
+          // === FIRESTORE DATA STRUCTURE ===
+          // Comprehensive user profile data saved to Users/{uid} collection
+          // Uses SetOptions(merge: true) to preserve existing fields (email, role, uid, status)
+          final data =
+              <String, dynamic>{
+                // --- CORE FIELDS (All Users) ---
+                'fullName': _fullNameController.text.trim(), // Full legal name
+                'address': _addressController.text
+                    .trim(), // Residential address
+                'birthdate': _birthDate != null
+                    ? Timestamp.fromDate(_birthDate!)
+                    : null, // Date of birth
+                // Cloudinary image URLs (secure HTTPS links)
+                if (profileUrl != null) 'profilePictureUrl': profileUrl,
+                if (idUrl != null) 'idScreenshotUrl': idUrl,
+
+                // --- ROLE IDENTIFIERS ---
+                // Student ID or Teacher ID (mutually exclusive based on role)
+                if (studentId != null && studentId.isNotEmpty)
+                  'studentId': studentId,
+                if (teacherId != null && teacherId.isNotEmpty)
+                  'teacherId': teacherId,
+
+                // --- STUDENT-SPECIFIC FIELDS ---
+                if (_role == 'student')
+                  'studentContactPhone': _studentPhoneController.text
+                      .trim(), // Optional student phone
+                if (_role == 'student')
+                  'parentPhone': _parentPhoneController.text
+                      .trim(), // Required parent/guardian phone
+                if (_role == 'student')
+                  'guardianName': _guardianNameController.text
+                      .trim(), // Required guardian name
+                if (_role == 'student')
+                  'section': _sectionController.text
+                      .trim(), // Academic section/class
+                if (_role == 'student')
+                  'adviserTeacherUid':
+                      _selectedTeacherUid, // Assigned teacher UID
+                if (_role == 'student')
+                  'adviserTeacherName':
+                      _selectedTeacherName, // Assigned teacher name
+                // --- TEACHER-SPECIFIC FIELDS ---
+                // Advisory section: which class/section the teacher advises (displayed in profile)
+                if (_role == 'teacher')
+                  'advisory': _teacherAdvisoryController.text.trim(),
+                // Contact number: teacher's phone for school communication
+                if (_role == 'teacher')
+                  'contactNumber': _teacherPhoneController.text.trim(),
+
+                // --- COMPLIANCE TRACKING ---
+                'acceptedTerms': true, // Terms & conditions acceptance flag
+                'acceptedTermsAt':
+                    FieldValue.serverTimestamp(), // Acceptance timestamp
+              }..removeWhere(
+                (k, v) => v == null,
+              ); // Remove null values to keep document clean
+
+          // === DEBUG LOGGING ===
+          // Console output for development/troubleshooting
           print('=== SAVING TO FIRESTORE ===');
           print('Profile URL: $profileUrl');
           print('ID URL: $idUrl');
@@ -274,10 +385,16 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
           print('Data: $data');
           print('==========================');
 
+          // === FIRESTORE WRITE OPERATION ===
+          // Merge operation preserves existing fields from register_page.dart (email, uid, role, status)
+          // and adds comprehensive profile data collected in this screen
           await FirebaseFirestore.instance
               .collection('Users')
               .doc(User.uid)
-              .set(data, SetOptions(merge: true))
+              .set(
+                data,
+                SetOptions(merge: true),
+              ) // merge: true prevents overwriting existing data
               .timeout(
                 const Duration(seconds: 10),
                 onTimeout: () {
@@ -287,7 +404,10 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
 
           print('✅ Data saved successfully to Firestore');
 
-          // Success! Navigate to pending verification screen
+          // === UNIFIED REGISTRATION COMPLETE ===
+          // User profile is now complete with all required information
+          // Navigate to PendingVerificationScreen where user awaits admin approval
+          // Admin will review profile picture, ID screenshot, and all submitted data
           if (!mounted) return;
           Navigator.of(context).pushReplacement(
             MaterialPageRoute(
@@ -465,41 +585,53 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Header
+                      // === HEADER SECTION ===
                       const Text(
                         'Complete Profile',
                         style: TextStyle(fontFamily: 'NexaBold', fontSize: 26),
                       ),
                       const SizedBox(height: 12),
+                      // Display current logged-in email (from Google or email/password)
                       Text(
                         'Signed in as ${User.email}',
                         style: const TextStyle(fontFamily: 'NexaRegular'),
                       ),
                       const SizedBox(height: 20),
-                      // Role selection (hidden if forced by caller)
+
+                      // === ROLE SELECTOR (CONDITIONAL) ===
+                      // Hidden if forcedRole is provided from register_page.dart
+                      // This ensures Google Sign-In users cannot change their pre-selected role
+                      // For legacy/incomplete users, role selector is shown
                       if (widget.forcedRole == null)
-                        SegmentedButton<String>(
-                          segments: const [
-                            ButtonSegment(
-                              value: 'student',
-                              label: Text('Student'),
-                            ),
-                            ButtonSegment(
-                              value: 'teacher',
-                              label: Text('Teacher'),
-                            ),
-                          ],
-                          selected: {_role},
-                          onSelectionChanged: (s) async {
-                            setState(() => _role = s.first);
-                            if (_role == 'student' && _teachers.isEmpty) {
-                              await _loadTeachers();
-                            }
-                          },
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: SegmentedButton<String>(
+                            segments: const [
+                              ButtonSegment(
+                                value: 'student',
+                                label: Text('Student'),
+                              ),
+                              ButtonSegment(
+                                value: 'teacher',
+                                label: Text('Teacher'),
+                              ),
+                            ],
+                            selected: {_role},
+                            onSelectionChanged: (s) async {
+                              setState(() => _role = s.first);
+                              // Load teacher list when switching to student role
+                              if (_role == 'student' && _teachers.isEmpty) {
+                                await _loadTeachers();
+                              }
+                            },
+                          ),
                         ),
+
+                      // === ROLE-SPECIFIC FORM FIELDS ===
+                      // Fields displayed only for student or teacher roles
                       if (_role == 'student' || _role == 'teacher') ...[
                         const SizedBox(height: 20),
-                        // ID field: Student ID or Teacher ID
+                        // ID field: Student ID or Teacher ID (required)
                         TextFormField(
                           controller: _idController,
                           decoration: InputDecoration(
@@ -573,31 +705,21 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
                             },
                           ),
                           const SizedBox(height: 16),
+                          // Advisory Section field for teachers
+                          // This stores which class/section the teacher is advising (e.g., "Grade 10-A")
+                          // Displayed in teacher profile and used for student-teacher association
                           TextFormField(
-                            controller: _teacherSectionController,
+                            controller: _teacherAdvisoryController,
                             decoration: const InputDecoration(
-                              labelText: 'Section / Advisory',
+                              labelText: 'Advisory Section',
+                              hintText: 'e.g., Grade 10-A',
                               border: OutlineInputBorder(),
                             ),
+                            // Validation: Advisory Section is required for all teachers
                             validator: (v) {
                               if (_role == 'teacher' &&
                                   (v == null || v.trim().isEmpty)) {
-                                return 'Section required';
-                              }
-                              return null;
-                            },
-                          ),
-                          const SizedBox(height: 16),
-                          TextFormField(
-                            controller: _teacherAdviserController,
-                            decoration: const InputDecoration(
-                              labelText: 'Adviser',
-                              border: OutlineInputBorder(),
-                            ),
-                            validator: (v) {
-                              if (_role == 'teacher' &&
-                                  (v == null || v.trim().isEmpty)) {
-                                return 'Adviser required';
+                                return 'Advisory Section required';
                               }
                               return null;
                             },
@@ -660,42 +782,79 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
                             },
                           ),
                           const SizedBox(height: 16),
-                          TextFormField(
-                            controller: _sectionController,
+                          DropdownButtonFormField<String>(
+                            isExpanded: true,
                             decoration: const InputDecoration(
                               labelText: 'Section / Class',
                               border: OutlineInputBorder(),
                             ),
+                            value: _selectedTeacherAdvisory,
+                            items:
+                                (_selectedTeacherAdvisory != null &&
+                                    _selectedTeacherAdvisory!.isNotEmpty)
+                                ? [
+                                    DropdownMenuItem<String>(
+                                      value: _selectedTeacherAdvisory,
+                                      child: Text(_selectedTeacherAdvisory!),
+                                    ),
+                                  ]
+                                : <DropdownMenuItem<String>>[],
+                            onChanged: (val) {
+                              setState(() {
+                                _selectedTeacherAdvisory = val;
+                                _sectionController.text = val ?? '';
+                              });
+                            },
                             validator: (v) {
                               if (_role == 'student' &&
-                                  (v == null || v.trim().isEmpty)) {
-                                return 'Section required';
+                                  (_selectedTeacherAdvisory == null ||
+                                      _selectedTeacherAdvisory!
+                                          .trim()
+                                          .isEmpty)) {
+                                return 'Section required (choose adviser with advisory)';
                               }
                               return null;
                             },
+                            hint: const Text('Select adviser to load section'),
                           ),
                           const SizedBox(height: 16),
                           DropdownButtonFormField<String>(
+                            isExpanded: true,
                             decoration: const InputDecoration(
                               labelText: 'Adviser / Teacher',
                               border: OutlineInputBorder(),
                             ),
-                            items: _teachers
-                                .map(
-                                  (t) => DropdownMenuItem<String>(
-                                    value: t['uid'],
-                                    child: Text(t['name'] ?? 'Teacher'),
-                                  ),
-                                )
-                                .toList(),
+                            items: _teachers.map((t) {
+                              final advisory = t['advisory'];
+                              final name = t['name'] ?? 'Teacher';
+                              final subtitle =
+                                  (advisory != null && advisory.isNotEmpty)
+                                  ? ' - $advisory'
+                                  : '';
+                              return DropdownMenuItem<String>(
+                                value: t['uid'],
+                                child: Text('$name$subtitle'),
+                              );
+                            }).toList(),
                             initialValue: _selectedTeacherUid,
                             onChanged: (val) {
                               setState(() {
                                 _selectedTeacherUid = val;
-                                _selectedTeacherName = _teachers.firstWhere(
+                                final match = _teachers.firstWhere(
                                   (e) => e['uid'] == val,
-                                  orElse: () => {'uid': val ?? '', 'name': ''},
-                                )['name'];
+                                  orElse: () => {
+                                    'uid': val ?? '',
+                                    'name': '',
+                                    'advisory': '',
+                                  },
+                                );
+                                _selectedTeacherName = match['name'] ?? '';
+                                final advisory = (match['advisory'] ?? '')
+                                    .trim();
+                                _selectedTeacherAdvisory = advisory.isEmpty
+                                    ? null
+                                    : advisory;
+                                _sectionController.text = advisory;
                               });
                             },
                             validator: (v) {
@@ -978,11 +1137,17 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
                                         );
                                         return;
                                       }
-                                      if (_sectionController.text
-                                          .trim()
-                                          .isEmpty) {
+                                      final sectionValue = _sectionController
+                                          .text
+                                          .trim();
+                                      if (sectionValue.isEmpty ||
+                                          _selectedTeacherAdvisory == null ||
+                                          _selectedTeacherAdvisory!
+                                              .trim()
+                                              .isEmpty) {
                                         setState(
-                                          () => _error = 'Section required',
+                                          () => _error =
+                                              'Section required (choose adviser with advisory)',
                                         );
                                         return;
                                       }
@@ -1003,19 +1168,13 @@ class _CompleteCredentialsScreenState extends State<CompleteCredentialsScreen> {
                                         );
                                         return;
                                       }
-                                      if (_teacherSectionController.text
+                                      // Validate Advisory Section before submission
+                                      if (_teacherAdvisoryController.text
                                           .trim()
                                           .isEmpty) {
                                         setState(
-                                          () => _error = 'Section required',
-                                        );
-                                        return;
-                                      }
-                                      if (_teacherAdviserController.text
-                                          .trim()
-                                          .isEmpty) {
-                                        setState(
-                                          () => _error = 'Adviser required',
+                                          () => _error =
+                                              'Advisory Section required',
                                         );
                                         return;
                                       }

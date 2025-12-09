@@ -19,6 +19,8 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
   final _db = FirebaseFirestore.instance;
   QrKind _kind = QrKind.checkIn;
   int _intervalSeconds = 30; // dynamic QR rotation interval
+  int _validityMinutes = 2; // static QR validity (minutes)
+  int _graceMinutes = 1; // grace window (minutes) for late scans
   String? _selectedEventId;
   bool _loadingEvents = true;
   List<QueryDocumentSnapshot<Map<String, dynamic>>> _events = [];
@@ -177,6 +179,7 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
     String token, {
     required QrKind kind,
     int? validitySeconds,
+    int? graceSeconds,
   }) async {
     if (_selectedEventId == null) return;
     setState(() => _publishing = true);
@@ -185,6 +188,7 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
       'kind': kind.name,
       'createdAt': FieldValue.serverTimestamp(),
       if (validitySeconds != null) 'validFor': validitySeconds,
+      if (graceSeconds != null) 'gracePeriodSeconds': graceSeconds,
       'eventId': _selectedEventId,
       'issuerUid': User.uid,
     };
@@ -207,6 +211,7 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
       first,
       kind: QrKind.dynamicToken,
       validitySeconds: _intervalSeconds,
+      graceSeconds: _graceMinutes * 60,
     );
     _timerSub = Stream.periodic(Duration(seconds: _intervalSeconds)).listen((
       _,
@@ -217,6 +222,7 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
         t,
         kind: QrKind.dynamicToken,
         validitySeconds: _intervalSeconds,
+        graceSeconds: _graceMinutes * 60,
       );
     });
     await _loadSelectedEventRadius();
@@ -313,7 +319,12 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
       _stopDynamic();
       final token = _buildStaticToken();
       setState(() => _currentToken = token);
-      _publishToken(token, kind: _kind);
+      _publishToken(
+        token,
+        kind: _kind,
+        validitySeconds: _validityMinutes * 60,
+        graceSeconds: _graceMinutes * 60,
+      );
     }
   }
 
@@ -479,6 +490,33 @@ class _QrGeneratorScreenState extends State<QrGeneratorScreen> {
                 ],
               ),
             ],
+            if (_kind != QrKind.dynamicToken) ...[
+              const SizedBox(height: 12),
+              TextField(
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  labelText: 'Valid for (minutes)',
+                ),
+                keyboardType: TextInputType.number,
+                onChanged: (v) {
+                  final parsed = int.tryParse(v) ?? _validityMinutes;
+                  setState(() => _validityMinutes = parsed);
+                },
+              ),
+            ],
+            const SizedBox(height: 12),
+            TextField(
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                labelText: 'Grace period (minutes)',
+                helperText: 'Late window after expiry',
+              ),
+              keyboardType: TextInputType.number,
+              onChanged: (v) {
+                final parsed = int.tryParse(v) ?? _graceMinutes;
+                setState(() => _graceMinutes = parsed);
+              },
+            ),
             const SizedBox(height: 20),
             SizedBox(
               width: double.infinity,

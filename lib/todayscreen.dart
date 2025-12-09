@@ -14,6 +14,19 @@ import 'package:attendanceapp/services/location_service.dart';
 // Token classification moved to top-level (enums cannot be inside classes)
 enum _ScanType { checkIn, checkOut, dynamicToken, event, unknown }
 
+// Result of timing validation for a scanned QR token.
+class _TokenWindowResult {
+  final bool allowProceed;
+  final String status; // Present | Late | Absent
+  final String? message;
+
+  const _TokenWindowResult({
+    required this.allowProceed,
+    required this.status,
+    this.message,
+  });
+}
+
 // Student attendance screen with QR flows and geofence validation.
 // Shows live date/time, check-in/out status, address, and map markers.
 class TodayScreen extends StatefulWidget {
@@ -56,6 +69,183 @@ class _TodayScreenState extends State<TodayScreen> {
       return parts[1];
     }
     return null;
+  }
+
+  // Persist a normalized attendance record for teacher dashboards.
+  Future<void> _writeAttendanceLog({
+    required String studentDocId,
+    required Map<String, dynamic> studentData,
+    required String dateId,
+    required String status,
+    required Timestamp eventTimestamp,
+    Timestamp? checkInTime,
+    Timestamp? checkOutTime,
+  }) async {
+    try {
+      final parsedDate = DateFormat('dd MMMM yyyy').parse(dateId);
+      final dateOnly = Timestamp.fromDate(
+        DateTime(parsedDate.year, parsedDate.month, parsedDate.day),
+      );
+
+      // Resolve advisory: check Student doc first, then Users collection
+      String advisory =
+          ([
+                    studentData['advisory'],
+                    studentData['section'],
+                    studentData['adviserTeacherAdvisory'],
+                  ]
+                  .map((v) => (v ?? '').toString().trim())
+                  .firstWhere((v) => v.isNotEmpty, orElse: () => ''))
+              .trim();
+
+      String adviserUid = (studentData['adviserTeacherUid'] ?? '')
+          .toString()
+          .trim();
+      String adviserName = (studentData['adviserTeacherName'] ?? '')
+          .toString()
+          .trim();
+
+      // If advisory missing, fetch from Users collection
+      if (advisory.isEmpty || adviserUid.isEmpty) {
+        try {
+          final userSnap = await FirebaseFirestore.instance
+              .collection('Users')
+              .doc(User.uid)
+              .get();
+          if (userSnap.exists) {
+            final userData = userSnap.data() as Map<String, dynamic>;
+            if (advisory.isEmpty) {
+              advisory = (userData['section'] ?? userData['advisory'] ?? '')
+                  .toString()
+                  .trim();
+            }
+            if (adviserUid.isEmpty) {
+              adviserUid = (userData['adviserTeacherUid'] ?? '')
+                  .toString()
+                  .trim();
+            }
+            if (adviserName.isEmpty) {
+              adviserName = (userData['adviserTeacherName'] ?? '')
+                  .toString()
+                  .trim();
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Resolve student name: try Student doc fields first, then Users collection
+      String name = (studentData['name'] ?? studentData['fullName'] ?? '')
+          .toString()
+          .trim();
+      if (name.isEmpty) {
+        try {
+          final userSnap = await FirebaseFirestore.instance
+              .collection('Users')
+              .doc(User.uid)
+              .get();
+          if (userSnap.exists) {
+            final userData = userSnap.data() as Map<String, dynamic>;
+            name = (userData['fullName'] ?? '').toString().trim();
+          }
+        } catch (_) {}
+      }
+      if (name.isEmpty) {
+        name = (studentData['id'] ?? User.studentId).toString();
+      }
+
+      final studentId =
+          (studentData['id'] ?? studentData['studentId'] ?? User.studentId)
+              .toString()
+              .trim();
+      final docId = '${dateId}_$studentId';
+
+      await FirebaseFirestore.instance
+          .collection('AttendanceRecords')
+          .doc(docId)
+          .set({
+            'studentDocId': studentDocId,
+            'studentId': studentId,
+            'studentName': name,
+            'date': dateOnly,
+            'timestamp': eventTimestamp,
+            'status': status,
+            'advisory': advisory,
+            'section': advisory,
+            if (checkInTime != null) 'checkInTime': checkInTime,
+            if (checkOutTime != null) 'checkOutTime': checkOutTime,
+            if (adviserUid.isNotEmpty) 'adviserTeacherUid': adviserUid,
+            if (adviserName.isNotEmpty) 'adviserTeacherName': adviserName,
+          }, SetOptions(merge: true));
+    } catch (_) {
+      // Swallow logging errors to avoid blocking UX; teacher view will simply miss row if it fails.
+    }
+  }
+
+  // Validate QR timing using the stored token metadata under Events/<id>/activeTokens.
+  // Returns whether scanning can proceed and the resulting attendance status.
+  Future<_TokenWindowResult> _evaluateTokenWindow(String token) async {
+    final eventId = _extractEventId(token);
+    if (eventId == null || eventId == 'NONE') {
+      return const _TokenWindowResult(allowProceed: true, status: 'Present');
+    }
+
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('Events')
+          .doc(eventId)
+          .collection('activeTokens')
+          .doc(token)
+          .get();
+
+      if (!snap.exists) {
+        return const _TokenWindowResult(
+          allowProceed: false,
+          status: 'Absent',
+          message: 'QR expired or not recognized.',
+        );
+      }
+
+      final data = snap.data() as Map<String, dynamic>;
+      final createdAt = data['createdAt'] as Timestamp?;
+      final validFor = (data['validFor'] as num?)?.toInt() ?? 120;
+      final graceSeconds = (data['gracePeriodSeconds'] as num?)?.toInt() ?? 60;
+
+      if (createdAt == null) {
+        return const _TokenWindowResult(
+          allowProceed: false,
+          status: 'Absent',
+          message: 'QR timing is unavailable.',
+        );
+      }
+
+      final expiry = createdAt.toDate().add(Duration(seconds: validFor));
+      final lateCutoff = expiry.add(Duration(seconds: graceSeconds));
+      final now = DateTime.now();
+
+      if (now.isAfter(lateCutoff)) {
+        return const _TokenWindowResult(
+          allowProceed: false,
+          status: 'Absent',
+          message: 'QR expired. Marked absent.',
+        );
+      }
+
+      if (now.isAfter(expiry)) {
+        return const _TokenWindowResult(
+          allowProceed: true,
+          status: 'Late',
+          message: 'Within grace period; marked late.',
+        );
+      }
+
+      return const _TokenWindowResult(allowProceed: true, status: 'Present');
+    } catch (_) {
+      return const _TokenWindowResult(
+        allowProceed: false,
+        status: 'Absent',
+        message: 'Unable to verify QR token timing.',
+      );
+    }
   }
 
   // Validate current coordinates against an event geofence.
@@ -579,36 +769,46 @@ class _TodayScreenState extends State<TodayScreen> {
                             );
                             if (!mounted) return;
                             if (code == null) return;
-                            // Classify token intent and capture precise coordinates.
+                            // Classify token intent and validate expiry/grace timing.
                             final scanType = _classifyToken(code);
-                            final position = await _capturePrecisePosition();
+                            final tokenWindow = await _evaluateTokenWindow(
+                              code,
+                            );
                             if (!mounted) return;
-                            double? lat = position?.latitude;
-                            double? lng = position?.longitude;
-                            if (position != null) {
-                              try {
-                                final placemarks =
-                                    await placemarkFromCoordinates(
-                                      position.latitude,
-                                      position.longitude,
-                                    );
-                                if (!mounted) return;
-                                if (placemarks.isNotEmpty) {
-                                  final p = placemarks.first;
-                                  location =
-                                      [
-                                            p.street,
-                                            p.subLocality,
-                                            p.locality,
-                                            p.administrativeArea,
-                                            p.postalCode,
-                                            p.country,
-                                          ]
-                                          .whereType<String>()
-                                          .where((e) => e.trim().isNotEmpty)
-                                          .join(', ');
-                                }
-                              } catch (_) {}
+
+                            Position? position;
+                            double? lat;
+                            double? lng;
+                            if (tokenWindow.allowProceed) {
+                              position = await _capturePrecisePosition();
+                              if (!mounted) return;
+                              lat = position?.latitude;
+                              lng = position?.longitude;
+                              if (position != null) {
+                                try {
+                                  final placemarks =
+                                      await placemarkFromCoordinates(
+                                        position.latitude,
+                                        position.longitude,
+                                      );
+                                  if (!mounted) return;
+                                  if (placemarks.isNotEmpty) {
+                                    final p = placemarks.first;
+                                    location =
+                                        [
+                                              p.street,
+                                              p.subLocality,
+                                              p.locality,
+                                              p.administrativeArea,
+                                              p.postalCode,
+                                              p.country,
+                                            ]
+                                            .whereType<String>()
+                                            .where((e) => e.trim().isNotEmpty)
+                                            .join(', ');
+                                  }
+                                } catch (_) {}
+                              }
                             }
                             final now = DateTime.now();
                             final dateId = DateFormat(
@@ -633,6 +833,8 @@ class _TodayScreenState extends State<TodayScreen> {
                                 return;
                               }
                               final studentDocId = studentQuery.docs.first.id;
+                              final studentData = studentQuery.docs.first
+                                  .data();
                               final recordRef = FirebaseFirestore.instance
                                   .collection('Student')
                                   .doc(studentDocId)
@@ -641,6 +843,33 @@ class _TodayScreenState extends State<TodayScreen> {
                               final recordSnap = await recordRef.get();
                               if (!mounted) return;
                               final existing = recordSnap.data();
+
+                              // If QR already expired beyond grace, mark absent and exit early.
+                              if (!tokenWindow.allowProceed) {
+                                await recordRef.set({
+                                  'date': Timestamp.now(),
+                                  'status': tokenWindow.status,
+                                  'statusReason':
+                                      tokenWindow.message ?? 'QR expired.',
+                                  'qrCode': code,
+                                }, SetOptions(merge: true));
+                                await _writeAttendanceLog(
+                                  studentDocId: studentDocId,
+                                  studentData: studentData,
+                                  dateId: dateId,
+                                  status: tokenWindow.status,
+                                  eventTimestamp: Timestamp.now(),
+                                );
+                                messenger.showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      tokenWindow.message ??
+                                          'QR expired or not recognized.',
+                                    ),
+                                  ),
+                                );
+                                return;
+                              }
 
                               // Guard: wrong sequence or duplicate scans
                               if (checkIn == '--/--') {
@@ -672,9 +901,19 @@ class _TodayScreenState extends State<TodayScreen> {
                                   'checkOut': '--/--',
                                   'location': location,
                                   'qrCode': code,
+                                  'status': tokenWindow.status,
+                                  'statusReason': tokenWindow.message,
+                                  'statusEvaluatedAt': Timestamp.now(),
                                   if (lat != null) 'checkInLat': lat,
                                   if (lng != null) 'checkInLng': lng,
                                 }, SetOptions(merge: true));
+                                await _writeAttendanceLog(
+                                  studentDocId: studentDocId,
+                                  studentData: studentData,
+                                  dateId: dateId,
+                                  status: tokenWindow.status,
+                                  eventTimestamp: Timestamp.now(),
+                                );
                                 if (!mounted) return;
                                 setState(() {
                                   checkIn = timeStr;
@@ -682,8 +921,12 @@ class _TodayScreenState extends State<TodayScreen> {
                                   checkInLng = lng;
                                 });
                                 messenger.showSnackBar(
-                                  const SnackBar(
-                                    content: Text('Checked in via QR'),
+                                  SnackBar(
+                                    content: Text(
+                                      tokenWindow.status == 'Late'
+                                          ? 'Checked in (late - grace window)'
+                                          : 'Checked in via QR',
+                                    ),
                                   ),
                                 );
                               } else if (checkOut == '--/--') {
@@ -730,6 +973,15 @@ class _TodayScreenState extends State<TodayScreen> {
                                     'checkIn': checkIn,
                                     'checkOut': timeStr,
                                     'qrCodeOut': code,
+                                    'status':
+                                        existing?['status'] ??
+                                        tokenWindow.status,
+                                    'statusReason':
+                                        existing?['statusReason'] ??
+                                        tokenWindow.message,
+                                    'statusEvaluatedAt':
+                                        existing?['statusEvaluatedAt'] ??
+                                        Timestamp.now(),
                                     if (lat != null) 'checkOutLat': lat,
                                     if (lng != null) 'checkOutLng': lng,
                                   });
@@ -749,10 +1001,28 @@ class _TodayScreenState extends State<TodayScreen> {
                                   await recordRef.update({
                                     'checkOut': timeStr,
                                     'qrCodeOut': code,
+                                    'status':
+                                        existing?['status'] ??
+                                        tokenWindow.status,
+                                    'statusReason':
+                                        existing?['statusReason'] ??
+                                        tokenWindow.message,
+                                    'statusEvaluatedAt':
+                                        existing?['statusEvaluatedAt'] ??
+                                        Timestamp.now(),
                                     if (lat != null) 'checkOutLat': lat,
                                     if (lng != null) 'checkOutLng': lng,
                                   });
                                 }
+                                await _writeAttendanceLog(
+                                  studentDocId: studentDocId,
+                                  studentData: studentData,
+                                  dateId: dateId,
+                                  status:
+                                      existing?['status'] ?? tokenWindow.status,
+                                  eventTimestamp: Timestamp.now(),
+                                  checkOutTime: Timestamp.now(),
+                                );
                                 if (!mounted) return;
                                 setState(() {
                                   checkOut = timeStr;
