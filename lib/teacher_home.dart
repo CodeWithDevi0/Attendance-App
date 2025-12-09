@@ -519,7 +519,11 @@ class _TeacherHomeState extends State<TeacherHome> {
                     onTap: () {
                       Navigator.of(context).push(
                         MaterialPageRoute(
-                          builder: (_) => const VerificationScreen(),
+                          builder: (_) => VerificationScreen(
+                            onlyStudents: true,
+                            teacherAdvisory: _teacherAdvisory,
+                            userRole: 'teacher',
+                          ),
                         ),
                       );
                     },

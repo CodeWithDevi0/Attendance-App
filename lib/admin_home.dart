@@ -249,7 +249,10 @@ class _AdminHomeState extends State<AdminHome> {
                     onTap: () => Navigator.of(context)
                         .push(
                           MaterialPageRoute(
-                            builder: (_) => const VerificationScreen(),
+                            builder: (_) => const VerificationScreen(
+                              onlyStudents: false, // Admin sees all users
+                              userRole: 'admin', // Admin has full control
+                            ),
                           ),
                         )
                         .then((_) => _fetchStats()),
@@ -431,7 +434,7 @@ class SettingsScreen extends StatelessWidget {
                         style: TextStyle(fontSize: 12, color: Colors.grey),
                       ),
                       value: true,
-                      activeColor: colSuccess,
+                      activeThumbColor: colSuccess,
                       onChanged: (val) {},
                     ),
                     const Divider(height: 1),
@@ -452,7 +455,7 @@ class SettingsScreen extends StatelessWidget {
                         style: TextStyle(fontFamily: 'NexaBold', fontSize: 14),
                       ),
                       value: false,
-                      activeColor: colSuccess,
+                      activeThumbColor: colSuccess,
                       onChanged: (val) {},
                     ),
                   ],
@@ -607,7 +610,7 @@ class _UsersListViewState extends State<UsersListView> {
                 ),
                 const SizedBox(height: 16),
                 DropdownButtonFormField<String>(
-                  value: role,
+                  initialValue: role,
                   decoration: const InputDecoration(labelText: 'Role'),
                   items: const [
                     DropdownMenuItem(value: 'student', child: Text('Student')),
@@ -674,49 +677,46 @@ class _UsersListViewState extends State<UsersListView> {
                             );
                           }
 
-                          if (secondaryApp != null) {
-                            fb.UserCredential cred =
-                                await fb.FirebaseAuth.instanceFor(
-                                  app: secondaryApp,
-                                ).createUserWithEmailAndPassword(
-                                  email: email,
-                                  password: pass,
-                                );
-
-                            await _db
-                                .collection('Users')
-                                .doc(cred.user!.uid)
-                                .set({
-                                  'uid': cred.user!.uid,
-                                  'email': email,
-                                  'role': role,
-                                  'status': 'approved',
-                                  'createdAt': FieldValue.serverTimestamp(),
-                                  'providers': ['password'],
-                                });
-
-                            if (role == 'student') {
-                              await _db.collection('Student').add({
-                                'id': '',
-                                'email': email,
-                              });
-                            } else if (role == 'teacher') {
-                              await _db.collection('Teacher').add({
-                                'id': '',
-                                'email': email,
-                              });
-                            }
-
-                            await secondaryApp.delete();
-
-                            if (mounted) {
-                              Navigator.pop(ctx);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('User added successfully'),
-                                ),
+                          fb.UserCredential cred =
+                              await fb.FirebaseAuth.instanceFor(
+                                app: secondaryApp,
+                              ).createUserWithEmailAndPassword(
+                                email: email,
+                                password: pass,
                               );
-                            }
+
+                          await _db.collection('Users').doc(cred.user!.uid).set(
+                            {
+                              'uid': cred.user!.uid,
+                              'email': email,
+                              'role': role,
+                              'status': 'approved',
+                              'createdAt': FieldValue.serverTimestamp(),
+                              'providers': ['password'],
+                            },
+                          );
+
+                          if (role == 'student') {
+                            await _db.collection('Student').add({
+                              'id': '',
+                              'email': email,
+                            });
+                          } else if (role == 'teacher') {
+                            await _db.collection('Teacher').add({
+                              'id': '',
+                              'email': email,
+                            });
+                          }
+
+                          await secondaryApp.delete();
+
+                          if (mounted) {
+                            Navigator.pop(ctx);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('User added successfully'),
+                              ),
+                            );
                           }
                         } catch (e) {
                           setDialogState(() => isLoading = false);
@@ -776,7 +776,7 @@ class _UsersListViewState extends State<UsersListView> {
             ),
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
-              value: role,
+              initialValue: role,
               decoration: const InputDecoration(labelText: 'Role'),
               items: const [
                 DropdownMenuItem(value: 'student', child: Text('Student')),
@@ -786,7 +786,7 @@ class _UsersListViewState extends State<UsersListView> {
             ),
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
-              value: status,
+              initialValue: status,
               decoration: const InputDecoration(labelText: 'Status'),
               items: const [
                 DropdownMenuItem(value: 'pending', child: Text('Pending')),

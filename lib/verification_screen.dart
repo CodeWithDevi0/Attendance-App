@@ -1,25 +1,77 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
+import 'package:attendanceapp/model/user.dart';
 
 class VerificationScreen extends StatelessWidget {
   // Add a flag to restrict the view to students only
   final bool onlyStudents;
+  // Teacher's advisory section (for filtering and validation)
+  final String? teacherAdvisory;
+  // Current user's role (admin or teacher)
+  final String? userRole;
 
   const VerificationScreen({
     super.key,
     this.onlyStudents = false, // Defaults to showing everyone (for Admin)
+    this.teacherAdvisory,
+    this.userRole,
   });
 
   Future<void> _updateStatus(
     BuildContext context,
     String uid,
     String status,
+    Map<String, dynamic> userData,
   ) async {
     try {
+      // Validation: Teachers can only approve/reject students in their advisory
+      if (userRole == 'teacher') {
+        final userAdvisory =
+            userData['advisory']?.toString() ??
+            userData['section']?.toString() ??
+            userData['adviserTeacherAdvisory']?.toString();
+        final userRoleFromDoc = userData['role']?.toString();
+
+        // Teachers can only approve students
+        if (userRoleFromDoc != 'student') {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Teachers can only approve/reject students.'),
+                backgroundColor: Colors.red,
+                duration: Duration(seconds: 3),
+              ),
+            );
+          }
+          return;
+        }
+
+        // Teachers can only approve students in their advisory
+        if (teacherAdvisory == null ||
+            teacherAdvisory!.isEmpty ||
+            userAdvisory != teacherAdvisory) {
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  'You can only approve students in your advisory section (${teacherAdvisory ?? "None"}).',
+                ),
+                backgroundColor: Colors.red,
+                duration: const Duration(seconds: 3),
+              ),
+            );
+          }
+          return;
+        }
+      }
+
+      // If validation passes (or admin), proceed with status update
       await FirebaseFirestore.instance.collection('Users').doc(uid).set({
         'status': status,
         'statusUpdatedAt': FieldValue.serverTimestamp(),
+        'statusUpdatedBy': User.uid, // Track who approved/rejected
       }, SetOptions(merge: true));
+
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -123,16 +175,19 @@ class VerificationScreen extends StatelessWidget {
         .collection('Users')
         .where('status', isEqualTo: 'pending');
 
-    // IF TEACHER: Filter strictly for students
+    // IF TEACHER: Filter strictly for students (role filtering only in query)
     if (onlyStudents) {
       query = query.where('role', isEqualTo: 'student');
+      // Advisory filtering will be done client-side to avoid index requirements
     }
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text(
-          'Pending Accounts',
-          style: TextStyle(fontFamily: 'NexaBold', color: Colors.white),
+        title: Text(
+          userRole == 'teacher'
+              ? 'Verify Students (${teacherAdvisory ?? "No Advisory"})'
+              : 'Pending Accounts',
+          style: const TextStyle(fontFamily: 'NexaBold', color: Colors.white),
         ),
         backgroundColor: const Color(0xFF28a745), // Success Green
         iconTheme: const IconThemeData(color: Colors.white),
@@ -178,7 +233,22 @@ class VerificationScreen extends StatelessWidget {
                   ),
                 );
               }
-              final docs = snapshot.data?.docs ?? [];
+              var docs = snapshot.data?.docs ?? [];
+
+              // Client-side filtering for teachers by advisory
+              if (userRole == 'teacher' &&
+                  teacherAdvisory != null &&
+                  teacherAdvisory!.isNotEmpty) {
+                docs = docs.where((doc) {
+                  final data = doc.data();
+                  final userAdvisory =
+                      data['advisory']?.toString() ??
+                      data['section']?.toString() ??
+                      data['adviserTeacherAdvisory']?.toString();
+                  return userAdvisory == teacherAdvisory;
+                }).toList();
+              }
+
               if (docs.isEmpty) {
                 return Center(
                   child: Padding(
@@ -186,9 +256,12 @@ class VerificationScreen extends StatelessWidget {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        const Text(
-                          'No pending accounts found.',
-                          style: TextStyle(fontFamily: 'NexaRegular'),
+                        Text(
+                          userRole == 'teacher'
+                              ? 'No pending students found in your advisory (${teacherAdvisory ?? "None"}).'
+                              : 'No pending accounts found.',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontFamily: 'NexaRegular'),
                         ),
                         const SizedBox(height: 12),
                         ElevatedButton.icon(
@@ -214,6 +287,10 @@ class VerificationScreen extends StatelessWidget {
                   final address = d['address'];
                   final profileUrl = d['profilePictureUrl'];
                   final idUrl = d['idScreenshotUrl'];
+                  final userAdvisory =
+                      d['advisory']?.toString() ??
+                      d['section']?.toString() ??
+                      d['adviserTeacherAdvisory']?.toString();
 
                   return Card(
                     elevation: 4,
@@ -290,6 +367,15 @@ class VerificationScreen extends StatelessWidget {
                               'Teacher ID: $teacherId',
                               style: const TextStyle(fontFamily: 'NexaRegular'),
                             ),
+                          if (userAdvisory != null)
+                            Text(
+                              'Advisory/Section: $userAdvisory',
+                              style: const TextStyle(
+                                fontFamily: 'NexaBold',
+                                fontSize: 13,
+                                color: Colors.blueAccent,
+                              ),
+                            ),
                           if (address != null)
                             Text(
                               'Address: $address',
@@ -350,8 +436,9 @@ class VerificationScreen extends StatelessWidget {
                                     },
                                     loadingBuilder:
                                         (context, child, loadingProgress) {
-                                          if (loadingProgress == null)
+                                          if (loadingProgress == null) {
                                             return child;
+                                          }
                                           return Center(
                                             child: CircularProgressIndicator(
                                               value:
@@ -378,7 +465,7 @@ class VerificationScreen extends StatelessWidget {
                               // REJECT (Red)
                               ElevatedButton.icon(
                                 onPressed: () =>
-                                    _updateStatus(context, uid, 'rejected'),
+                                    _updateStatus(context, uid, 'rejected', d),
                                 icon: const Icon(
                                   Icons.close,
                                   color: Colors.white,
@@ -393,7 +480,7 @@ class VerificationScreen extends StatelessWidget {
                               // APPROVE (Green)
                               ElevatedButton.icon(
                                 onPressed: () =>
-                                    _updateStatus(context, uid, 'approved'),
+                                    _updateStatus(context, uid, 'approved', d),
                                 icon: const Icon(
                                   Icons.check,
                                   color: Colors.white,
