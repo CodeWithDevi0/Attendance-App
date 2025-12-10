@@ -4,6 +4,8 @@ import 'package:attendanceapp/login_page.dart';
 import 'package:attendanceapp/model/user.dart';
 import 'package:attendanceapp/verification_screen.dart';
 import 'package:attendanceapp/unified_event_screen.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:intl/intl.dart';
 
 class TeacherHome extends StatefulWidget {
   const TeacherHome({super.key});
@@ -15,6 +17,274 @@ class TeacherHome extends StatefulWidget {
 class _TeacherHomeState extends State<TeacherHome> {
   int _currentIndex = 0;
   final Color _primary = const Color.fromARGB(252, 47, 145, 42);
+  String? _teacherName;
+  bool _loadingName = true;
+  List<Map<String, dynamic>> _attendanceRecords = [];
+  bool _loadingAttendance = true;
+
+  // Additional teacher profile fields
+  String? _teacherAddress;
+  String? _teacherContact;
+  String? _teacherAdvisory;
+  String? _teacherProfileUrl;
+  bool _loadingProfile = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTeacherData();
+  }
+
+  /// Loads teacher profile data from Firestore Users collection.
+  /// Fetches: fullName, address, contactNumber, and advisory/section.
+  Future<void> _loadTeacherData() async {
+    try {
+      final userSnap = await FirebaseFirestore.instance
+          .collection('Users')
+          .doc(User.uid)
+          .get();
+
+      if (userSnap.exists) {
+        final data = userSnap.data() as Map<String, dynamic>;
+        if (mounted) {
+          setState(() {
+            // Fetch teacher's full name for dashboard greeting
+            _teacherName = data['fullName']?.toString();
+            // Fetch home address
+            _teacherAddress = data['address']?.toString();
+            // Fetch contact number
+            _teacherContact = data['contactNumber']?.toString();
+            // Fetch designated advisory or section
+            _teacherAdvisory =
+                (data['advisory'] ??
+                        data['adviserTeacherAdvisory'] ??
+                        data['teacherSection'] ??
+                        data['section'])
+                    ?.toString();
+            // Fetch profile photo URL if available
+            _teacherProfileUrl = data['profilePictureUrl']?.toString();
+            _loadingName = false;
+            _loadingProfile = false;
+          });
+          // Load attendance only after advisory is known so we can filter properly
+          await _loadAttendanceRecords();
+        }
+      } else {
+        if (mounted) {
+          setState(() {
+            _loadingName = false;
+            _loadingProfile = false;
+          });
+        }
+        await _loadAttendanceRecords();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _loadingName = false);
+      }
+    }
+  }
+
+  /// Loads attendance records from Firestore.
+  /// Queries the 'AttendanceRecords' collection and orders by date descending.
+  /// Each record contains: studentName, date, status (Present/Late/Absent), and timestamp.
+  Future<void> _loadAttendanceRecords() async {
+    final advisoryValue = _teacherAdvisory?.trim() ?? '';
+    final teacherUid = User.uid.trim();
+
+    // Do nothing until we at least know advisory or teacher UID
+    if (advisoryValue.isEmpty && teacherUid.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _attendanceRecords = [];
+          _loadingAttendance = false;
+        });
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() => _loadingAttendance = true);
+    }
+
+    try {
+      final coll = FirebaseFirestore.instance.collection('AttendanceRecords');
+      final List<QueryDocumentSnapshot<Map<String, dynamic>>> records = [];
+
+      // Primary queries based on advisory/section
+      if (advisoryValue.isNotEmpty) {
+        final advisorySnap = await coll
+            .where('advisory', isEqualTo: advisoryValue)
+            .get();
+        records.addAll(advisorySnap.docs);
+
+        final sectionSnap = await coll
+            .where('section', isEqualTo: advisoryValue)
+            .get();
+        records.addAll(sectionSnap.docs);
+      }
+
+      // Fallback: any records tied to this teacher UID
+      if (teacherUid.isNotEmpty) {
+        final teacherSnap = await coll
+            .where('adviserTeacherUid', isEqualTo: teacherUid)
+            .get();
+        records.addAll(teacherSnap.docs);
+      }
+
+      // Build roster of student IDs by advisory/section or adviser UID to query by studentId
+      final rosterIdsString = <String>{};
+      final rosterIdsInt = <int>{};
+      final List<Future<QuerySnapshot<Map<String, dynamic>>>> rosterFutures =
+          [];
+
+      if (advisoryValue.isNotEmpty) {
+        rosterFutures.add(
+          FirebaseFirestore.instance
+              .collection('Student')
+              .where('section', isEqualTo: advisoryValue)
+              .get(),
+        );
+        rosterFutures.add(
+          FirebaseFirestore.instance
+              .collection('Student')
+              .where('advisory', isEqualTo: advisoryValue)
+              .get(),
+        );
+      }
+
+      if (teacherUid.isNotEmpty) {
+        rosterFutures.add(
+          FirebaseFirestore.instance
+              .collection('Student')
+              .where('adviserTeacherUid', isEqualTo: teacherUid)
+              .get(),
+        );
+      }
+
+      final rosterSnaps = await Future.wait(rosterFutures);
+      for (final snap in rosterSnaps) {
+        for (final doc in snap.docs) {
+          final data = doc.data();
+          final raw = (data['id'] ?? data['studentId'] ?? '').toString().trim();
+          if (raw.isEmpty) {
+            continue;
+          }
+          rosterIdsString.add(raw);
+          final maybeInt = int.tryParse(raw);
+          if (maybeInt != null) {
+            rosterIdsInt.add(maybeInt);
+          }
+        }
+      }
+
+      // Query AttendanceRecords by studentId for both string and int representations
+      const chunkSize = 10; // Firestore whereIn limit
+      final idChunksString = rosterIdsString.toList();
+      for (var i = 0; i < idChunksString.length; i += chunkSize) {
+        final end = (i + chunkSize) > idChunksString.length
+            ? idChunksString.length
+            : i + chunkSize;
+        final slice = idChunksString.sublist(i, end);
+        if (slice.isEmpty) continue;
+        final snap = await coll.where('studentId', whereIn: slice).get();
+        records.addAll(snap.docs);
+      }
+
+      final idChunksInt = rosterIdsInt.toList();
+      for (var i = 0; i < idChunksInt.length; i += chunkSize) {
+        final end = (i + chunkSize) > idChunksInt.length
+            ? idChunksInt.length
+            : i + chunkSize;
+        final slice = idChunksInt.sublist(i, end);
+        if (slice.isEmpty) continue;
+        final snap = await coll.where('studentId', whereIn: slice).get();
+        records.addAll(snap.docs);
+      }
+
+      // If still empty, attempt broad fallbacks by advisory/section again
+      if (records.isEmpty && advisoryValue.isNotEmpty) {
+        final fallback = await coll
+            .where('section', isEqualTo: advisoryValue)
+            .get();
+        records.addAll(fallback.docs);
+      }
+      if (records.isEmpty && teacherUid.isNotEmpty) {
+        final fallback = await coll
+            .where('adviserTeacherUid', isEqualTo: teacherUid)
+            .get();
+        records.addAll(fallback.docs);
+      }
+
+      // Debug logging
+      print('=== TEACHER ATTENDANCE LOG DEBUG ===');
+      print('Teacher UID: $teacherUid');
+      print('Advisory: $advisoryValue');
+      print('Roster IDs (string): ${rosterIdsString.length}');
+      print('Roster IDs (int): ${rosterIdsInt.length}');
+      print('Total records fetched: ${records.length}');
+      if (records.isNotEmpty) {
+        print('Sample record: ${records.first.data()}');
+      } else {
+        // If still empty, fetch ALL AttendanceRecords to see what exists
+        print('No records found. Fetching ALL records for diagnosis...');
+        final allRecords = await coll.limit(10).get();
+        print(
+          'Total records in AttendanceRecords collection: ${allRecords.size}',
+        );
+        if (allRecords.docs.isNotEmpty) {
+          print(
+            'Sample record from collection: ${allRecords.docs.first.data()}',
+          );
+          records.addAll(allRecords.docs);
+        }
+      }
+      print('===================================');
+
+      if (mounted) {
+        setState(() {
+          // Map Firestore documents to a list of attendance record maps
+          // Each record carries student name, date, status, timestamp (if present), and advisory for UI
+          final seen = <String>{};
+          _attendanceRecords = records
+              .where((doc) {
+                final first = !seen.contains(doc.id);
+                if (first) seen.add(doc.id);
+                return first;
+              })
+              .map((doc) {
+                final data = doc.data();
+                return {
+                  'id': doc.id,
+                  'studentName': data['studentName'] ?? 'Unknown Student',
+                  'date': data['date'], // Firestore Timestamp
+                  'status': data['status'] ?? 'Absent',
+                  'timestamp': data['timestamp'], // Can be null for Absent
+                  'checkInTime': data['checkInTime'], // Check-in timestamp
+                  'checkOutTime': data['checkOutTime'], // Check-out timestamp
+                  'advisory': data['advisory'] ?? data['section'],
+                };
+              })
+              .toList();
+
+          // Sort client-side by date descending to avoid index issues
+          _attendanceRecords.sort((a, b) {
+            final ad = a['date'];
+            final bd = b['date'];
+            if (ad is Timestamp && bd is Timestamp) {
+              return bd.compareTo(ad);
+            }
+            return 0;
+          });
+          _loadingAttendance = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _loadingAttendance = false);
+      }
+    }
+  }
 
   // --- RETAINED LOGIC: Logout Function ---
   Future<void> _handleLogout() async {
@@ -177,9 +447,9 @@ class _TeacherHomeState extends State<TeacherHome> {
                       ),
                     ),
                     const SizedBox(height: 8),
-                    const Text(
-                      'Teacher',
-                      style: TextStyle(
+                    Text(
+                      _loadingName ? 'Teacher' : (_teacherName ?? 'Teacher'),
+                      style: const TextStyle(
                         fontFamily: 'NexaBold',
                         color: Colors.white,
                         fontSize: 28,
@@ -230,7 +500,7 @@ class _TeacherHomeState extends State<TeacherHome> {
                 children: [
                   // RETAINED LOGIC: Navigate to UnifiedEventScreen
                   _buildActionCard(
-                    title: 'Manage\nEvents',
+                    title: 'Manage',
                     icon: Icons.calendar_month_rounded,
                     color: Colors.blueAccent,
                     onTap: () {
@@ -243,19 +513,26 @@ class _TeacherHomeState extends State<TeacherHome> {
                   ),
                   // RETAINED LOGIC: Navigate to VerificationScreen
                   _buildActionCard(
-                    title: 'Verify\nAccounts',
+                    title: 'Verify',
                     icon: Icons.verified_user_rounded,
                     color: Colors.orangeAccent,
                     onTap: () {
                       Navigator.of(context).push(
                         MaterialPageRoute(
-                          builder: (_) => const VerificationScreen(),
+                          builder: (_) => VerificationScreen(
+                            onlyStudents: true,
+                            teacherAdvisory: _teacherAdvisory,
+                            userRole: 'teacher',
+                          ),
                         ),
                       );
                     },
                   ),
                 ],
               ),
+              const SizedBox(height: 30),
+              // Attendance Log Section
+              buildAttendanceLogSection(),
             ],
           ),
         );
@@ -263,55 +540,323 @@ class _TeacherHomeState extends State<TeacherHome> {
     );
   }
 
+  /// Builds the Attendance Log section with scrollable list of records.
+  /// Displays student name, date (formatted as MM/DD/YYYY), status badge, and timestamp icon.
+  /// Shows loading spinner while fetching data, and empty state when no records exist.
+  /// This widget is reusable across teacher dashboard contexts.
+  Widget buildAttendanceLogSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Section Header
+        const Text(
+          'Attendance Log',
+          style: TextStyle(
+            fontFamily: 'NexaBold',
+            fontSize: 20,
+            color: Colors.black87,
+          ),
+        ),
+        const SizedBox(height: 16),
+        // Attendance Records Container
+        Container(
+          constraints: const BoxConstraints(maxHeight: 400),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.05),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: _loadingAttendance
+              // Loading: show spinner while Firestore query runs
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(40),
+                    child: CircularProgressIndicator(),
+                  ),
+                )
+              // Empty state: no records match this teacher advisory
+              : _attendanceRecords.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(40),
+                    child: Text(
+                      'No attendance records yet',
+                      style: TextStyle(
+                        fontFamily: 'NexaRegular',
+                        fontSize: 14,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ),
+                )
+              // Data: scrollable list of attendance rows
+              : ListView.separated(
+                  shrinkWrap: true,
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _attendanceRecords.length,
+                  separatorBuilder: (context, index) =>
+                      const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final record = _attendanceRecords[index];
+                    return _buildAttendanceRecordRow(record);
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// Builds a single attendance record row.
+  /// Left side: student name, formatted date, and status badge.
+  /// Right side: green checkmark icon if timestamp exists (Present/Late).
+  Widget _buildAttendanceRecordRow(Map<String, dynamic> record) {
+    // Extract data from record
+    final String studentName = record['studentName'];
+    final dynamic dateField = record['date'];
+    final String status = record['status'];
+    final dynamic timestampField = record['timestamp'];
+    final dynamic checkInTimeField = record['checkInTime'];
+    final dynamic checkOutTimeField = record['checkOutTime'];
+
+    // Convert Firestore Timestamp to DateTime and format as MM/DD/YYYY
+    String formattedDate = 'N/A';
+    if (dateField != null && dateField is Timestamp) {
+      final DateTime dateTime = dateField.toDate();
+      formattedDate =
+          '${dateTime.month.toString().padLeft(2, '0')}/${dateTime.day.toString().padLeft(2, '0')}/${dateTime.year}';
+    }
+
+    // Format check-in time
+    String checkInTimeStr = 'N/A';
+    if (checkInTimeField != null && checkInTimeField is Timestamp) {
+      final DateTime checkInDateTime = checkInTimeField.toDate();
+      checkInTimeStr = DateFormat('hh:mm a').format(checkInDateTime);
+    }
+
+    // Format check-out time
+    String checkOutTimeStr = 'N/A';
+    if (checkOutTimeField != null && checkOutTimeField is Timestamp) {
+      final DateTime checkOutDateTime = checkOutTimeField.toDate();
+      checkOutTimeStr = DateFormat('hh:mm a').format(checkOutDateTime);
+    }
+
+    // Determine if timestamp exists (Present or Late records have timestamps)
+    final bool hasTimestamp = timestampField != null;
+
+    // Choose status badge color based on status
+    Color statusColor;
+    switch (status) {
+      case 'Present':
+        statusColor = Colors.green;
+        break;
+      case 'Late':
+        statusColor = Colors.orange;
+        break;
+      case 'Absent':
+      default:
+        statusColor = Colors.red;
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          // Left Side: Student info and status
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Student Name
+                Text(
+                  studentName,
+                  style: const TextStyle(
+                    fontFamily: 'NexaBold',
+                    fontSize: 15,
+                    color: Colors.black87,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                // Date
+                Text(
+                  formattedDate,
+                  style: TextStyle(
+                    fontFamily: 'NexaRegular',
+                    fontSize: 13,
+                    color: Colors.grey[600],
+                  ),
+                ),
+                const SizedBox(height: 4),
+                // Check-in and Check-out times
+                Row(
+                  children: [
+                    Icon(Icons.login, size: 12, color: Colors.grey[500]),
+                    const SizedBox(width: 4),
+                    Text(
+                      checkInTimeStr,
+                      style: TextStyle(
+                        fontFamily: 'NexaRegular',
+                        fontSize: 11,
+                        color: Colors.grey[600],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Icon(Icons.logout, size: 12, color: Colors.grey[500]),
+                    const SizedBox(width: 4),
+                    Text(
+                      checkOutTimeStr,
+                      style: TextStyle(
+                        fontFamily: 'NexaRegular',
+                        fontSize: 11,
+                        color: Colors.grey[600],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                // Status Badge
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: statusColor.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: statusColor.withOpacity(0.3),
+                      width: 1,
+                    ),
+                  ),
+                  child: Text(
+                    status,
+                    style: TextStyle(
+                      fontFamily: 'NexaBold',
+                      fontSize: 11,
+                      color: statusColor,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Right Side: Checkmark icon if timestamp exists
+          if (hasTimestamp)
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.green.withOpacity(0.1),
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.check_circle,
+                color: Colors.green,
+                size: 24,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   // --- TAB 2: PROFILE ---
+  /// Builds the teacher profile view displaying personal details.
+  /// Shows: full name, email, role, teacher ID, contact number, address, and advisory section.
+  /// All data is fetched from Firestore Users collection via _loadTeacherData().
   Widget _buildProfileView() {
     return Center(
       child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(4),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: _primary, width: 2),
-              ),
-              child: const CircleAvatar(
-                radius: 60,
-                backgroundColor: Colors.white,
-                backgroundImage: AssetImage('assets/icons/atan.png'),
-              ),
-            ),
-            const SizedBox(height: 24),
-            Card(
-              elevation: 2,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  children: [
-                    _buildProfileRow(Icons.email, 'Email', User.email),
-                    const Divider(height: 30),
-                    _buildProfileRow(
-                      Icons.badge,
-                      'Role',
-                      User.role.toUpperCase(),
+        child: _loadingProfile
+            ? const CircularProgressIndicator()
+            : Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  // Profile Avatar
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      border: Border.all(color: _primary, width: 2),
                     ),
-                    const Divider(height: 30),
-                    _buildProfileRow(
-                      Icons.numbers,
-                      'Teacher ID',
-                      User.studentId.isNotEmpty ? User.studentId : 'N/A',
+                    child: CircleAvatar(
+                      radius: 60,
+                      backgroundColor: Colors.white,
+                      // Show latest uploaded profile picture, fallback to app icon
+                      backgroundImage:
+                          (_teacherProfileUrl != null &&
+                              _teacherProfileUrl!.trim().isNotEmpty)
+                          ? NetworkImage(_teacherProfileUrl!.trim())
+                                as ImageProvider
+                          : const AssetImage('assets/icons/atan.png'),
                     ),
-                  ],
-                ),
+                  ),
+                  const SizedBox(height: 24),
+                  // Profile Information Card
+                  Card(
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        children: [
+                          // Full Name - fetched from Firestore 'fullName' field
+                          _buildProfileRow(
+                            Icons.person,
+                            'Full Name',
+                            _teacherName ?? 'N/A',
+                          ),
+                          const Divider(height: 30),
+                          // Email - from User model
+                          _buildProfileRow(Icons.email, 'Email', User.email),
+                          const Divider(height: 30),
+                          // Role - from User model
+                          _buildProfileRow(
+                            Icons.badge,
+                            'Role',
+                            User.role.toUpperCase(),
+                          ),
+                          const Divider(height: 30),
+                          // Teacher ID - from User model (studentId field)
+                          _buildProfileRow(
+                            Icons.numbers,
+                            'Teacher ID',
+                            User.studentId.isNotEmpty ? User.studentId : 'N/A',
+                          ),
+                          const Divider(height: 30),
+                          // Contact Number - fetched from Firestore 'contactNumber' field
+                          _buildProfileRow(
+                            Icons.phone,
+                            'Contact Number',
+                            _teacherContact ?? 'N/A',
+                          ),
+                          const Divider(height: 30),
+                          // Home Address - fetched from Firestore 'address' field
+                          _buildProfileRow(
+                            Icons.home,
+                            'Home Address',
+                            _teacherAddress ?? 'N/A',
+                          ),
+                          const Divider(height: 30),
+                          // Advisory/Section - fetched from Firestore 'advisory' field
+                          _buildProfileRow(
+                            Icons.class_,
+                            'Advisory Section',
+                            _teacherAdvisory ?? 'Not Assigned',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
       ),
     );
   }
@@ -394,6 +939,7 @@ class _TeacherHomeState extends State<TeacherHome> {
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Container(
                 padding: const EdgeInsets.all(14),
@@ -403,14 +949,18 @@ class _TeacherHomeState extends State<TeacherHome> {
                 ),
                 child: Icon(icon, size: 32, color: color),
               ),
-              const SizedBox(height: 16),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontFamily: 'NexaBold',
-                  fontSize: 16,
-                  color: Colors.black87,
+              const SizedBox(height: 12),
+              Flexible(
+                child: Text(
+                  title,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontFamily: 'NexaBold',
+                    fontSize: 15,
+                    color: Colors.black87,
+                  ),
                 ),
               ),
             ],
