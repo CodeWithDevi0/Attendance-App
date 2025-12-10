@@ -20,6 +20,8 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   QrKind _kind = QrKind.checkIn;
   int _intervalSeconds = 30;
+  int _validityMinutes = 2; // default validity (minutes) for static QR codes
+  int _graceMinutes = 1; // late window (minutes) after expiry
   String? _selectedEventId;
   StreamSubscription? _timerSub;
   String _currentToken = '';
@@ -281,6 +283,7 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
     String token, {
     required QrKind kind,
     int? validitySeconds,
+    int? graceSeconds,
   }) async {
     if (_selectedEventId == null) return;
     if (User.uid.isEmpty) return;
@@ -293,6 +296,7 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
         'kind': kind.name,
         'createdAt': FieldValue.serverTimestamp(),
         if (validitySeconds != null) 'validFor': validitySeconds,
+        if (graceSeconds != null) 'gracePeriodSeconds': graceSeconds,
         'eventId': _selectedEventId,
         'issuerUid': User.uid,
       };
@@ -341,8 +345,36 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                       labelText: 'Interval (seconds)',
                     ),
                     keyboardType: TextInputType.number,
-                    onChanged: (v) => _intervalSeconds = int.tryParse(v) ?? 30,
+                    onChanged: (v) {
+                      final parsed = int.tryParse(v) ?? 30;
+                      setState(() => _intervalSeconds = parsed);
+                      setDialogState(() => _intervalSeconds = parsed);
+                    },
                   ),
+                if (_kind != QrKind.dynamicToken)
+                  TextField(
+                    decoration: const InputDecoration(
+                      labelText: 'Valid for (minutes)',
+                    ),
+                    keyboardType: TextInputType.number,
+                    onChanged: (v) {
+                      final parsed = int.tryParse(v) ?? _validityMinutes;
+                      setState(() => _validityMinutes = parsed);
+                      setDialogState(() => _validityMinutes = parsed);
+                    },
+                  ),
+                TextField(
+                  decoration: const InputDecoration(
+                    labelText: 'Grace period (minutes)',
+                    helperText: 'Late window after expiry',
+                  ),
+                  keyboardType: TextInputType.number,
+                  onChanged: (v) {
+                    final parsed = int.tryParse(v) ?? _graceMinutes;
+                    setState(() => _graceMinutes = parsed);
+                    setDialogState(() => _graceMinutes = parsed);
+                  },
+                ),
                 const SizedBox(height: 16),
 
                 ElevatedButton(
@@ -368,6 +400,7 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                               first,
                               kind: QrKind.dynamicToken,
                               validitySeconds: _intervalSeconds,
+                              graceSeconds: _graceMinutes * 60,
                             );
 
                             _timerSub =
@@ -382,6 +415,7 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                                       t,
                                       kind: QrKind.dynamicToken,
                                       validitySeconds: _intervalSeconds,
+                                      graceSeconds: _graceMinutes * 60,
                                     );
                                   }
                                 });
@@ -391,7 +425,12 @@ class _UnifiedEventScreenState extends State<UnifiedEventScreen> {
                             setState(() => _currentToken = token);
                             setDialogState(() => _currentToken = token);
 
-                            await _publishToken(token, kind: _kind);
+                            await _publishToken(
+                              token,
+                              kind: _kind,
+                              validitySeconds: _validityMinutes * 60,
+                              graceSeconds: _graceMinutes * 60,
+                            );
                           }
                         },
                   child: Text(
